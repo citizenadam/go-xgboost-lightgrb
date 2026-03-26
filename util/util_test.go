@@ -176,8 +176,8 @@ func TestConstructBitset(t *testing.T) {
 }
 
 func TestSigmoidFloat64SliceInplace(t *testing.T) {
-	vec := [...]float64 {-1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0}
-	vecTrue := [...]float64 {0.26894142, 0.37754067, 0.4378235, 0.5, 0.5621765, 0.62245933, 0.73105858}
+	vec := [...]float64{-1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0}
+	vecTrue := [...]float64{0.26894142, 0.37754067, 0.4378235, 0.5, 0.5621765, 0.62245933, 0.73105858}
 	SigmoidFloat64SliceInplace(vec[:])
 	err := AlmostEqualFloat64Slices(vec[:], vecTrue[:], 1e-8)
 	if err != nil {
@@ -219,4 +219,260 @@ func TestSoftmaxFloat64Slice(t *testing.T) {
 		[]float64{},
 		[]float64{},
 	)
+}
+
+func TestFindInBitsetUint32(t *testing.T) {
+	// bit 0 is set
+	if !FindInBitsetUint32(1, 0) {
+		t.Error("bit 0 should be set")
+	}
+	// bit 5 is set
+	if !FindInBitsetUint32(32, 5) {
+		t.Error("bit 5 should be set")
+	}
+	// bit 0 is not set in value 2
+	if FindInBitsetUint32(2, 0) {
+		t.Error("bit 0 should not be set")
+	}
+	// pos >= 32 always returns false
+	if FindInBitsetUint32(0xFFFFFFFF, 32) {
+		t.Error("pos >= 32 should return false")
+	}
+	if FindInBitsetUint32(0xFFFFFFFF, 100) {
+		t.Error("pos >= 32 should return false")
+	}
+}
+
+func TestMinInt(t *testing.T) {
+	if MinInt(1, 2) != 1 {
+		t.Error("MinInt(1,2) should be 1")
+	}
+	if MinInt(2, 1) != 1 {
+		t.Error("MinInt(2,1) should be 1")
+	}
+	if MinInt(5, 5) != 5 {
+		t.Error("MinInt(5,5) should be 5")
+	}
+	if MinInt(-1, 0) != -1 {
+		t.Error("MinInt(-1,0) should be -1")
+	}
+}
+
+func TestStringParamsToInt(t *testing.T) {
+	p := stringParams{"num": "42", "bad": "not_a_number", "neg": "-7"}
+
+	v, err := p.ToInt("num")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != 42 {
+		t.Errorf("expected 42, got %d", v)
+	}
+
+	v, err = p.ToInt("neg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != -7 {
+		t.Errorf("expected -7, got %d", v)
+	}
+
+	_, err = p.ToInt("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+
+	_, err = p.ToInt("bad")
+	if err == nil {
+		t.Error("should fail for non-integer value")
+	}
+}
+
+func TestStringParamsToString(t *testing.T) {
+	p := stringParams{"name": "hello"}
+
+	v, err := p.ToString("name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != "hello" {
+		t.Errorf("expected 'hello', got '%s'", v)
+	}
+
+	_, err = p.ToString("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+}
+
+func TestStringParamsCompare(t *testing.T) {
+	p := stringParams{"objective": "binary"}
+
+	err := p.Compare("objective", "binary")
+	if err != nil {
+		t.Error("should match")
+	}
+
+	err = p.Compare("objective", "regression")
+	if err == nil {
+		t.Error("should fail for different value")
+	}
+
+	err = p.Compare("missing", "val")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+}
+
+func TestStringParamsToStrSlice(t *testing.T) {
+	p := stringParams{"features": "X1 X2 X3"}
+
+	v, err := p.ToStrSlice("features")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 3 || v[0] != "X1" || v[1] != "X2" || v[2] != "X3" {
+		t.Errorf("expected [X1 X2 X3], got %v", v)
+	}
+
+	_, err = p.ToStrSlice("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+}
+
+func TestStringParamsToFloat64Slice(t *testing.T) {
+	p := stringParams{"values": "1.0 2.5 -0.3"}
+
+	v, err := p.ToFloat64Slice("values")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 3 || AlmostEqualFloat64(v[0], 1.0, 1e-10) == false ||
+		AlmostEqualFloat64(v[1], 2.5, 1e-10) == false ||
+		AlmostEqualFloat64(v[2], -0.3, 1e-10) == false {
+		t.Errorf("expected [1.0 2.5 -0.3], got %v", v)
+	}
+
+	_, err = p.ToFloat64Slice("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+
+	p2 := stringParams{"bad": "1.0 not_a_float"}
+	_, err = p2.ToFloat64Slice("bad")
+	if err == nil {
+		t.Error("should fail for non-float value")
+	}
+}
+
+func TestStringParamsToUint32Slice(t *testing.T) {
+	p := stringParams{"indices": "0 5 100"}
+
+	v, err := p.ToUint32Slice("indices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 3 || v[0] != 0 || v[1] != 5 || v[2] != 100 {
+		t.Errorf("expected [0 5 100], got %v", v)
+	}
+
+	_, err = p.ToUint32Slice("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+
+	p2 := stringParams{"bad": "0 not_a_number"}
+	_, err = p2.ToUint32Slice("bad")
+	if err == nil {
+		t.Error("should fail for non-uint value")
+	}
+}
+
+func TestStringParamsToInt32Slice(t *testing.T) {
+	p := stringParams{"values": "0 -5 100"}
+
+	v, err := p.ToInt32Slice("values")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 3 || v[0] != 0 || v[1] != -5 || v[2] != 100 {
+		t.Errorf("expected [0 -5 100], got %v", v)
+	}
+
+	_, err = p.ToInt32Slice("missing")
+	if err == nil {
+		t.Error("should fail for missing key")
+	}
+
+	p2 := stringParams{"bad": "0 not_a_number"}
+	_, err = p2.ToInt32Slice("bad")
+	if err == nil {
+		t.Error("should fail for non-int value")
+	}
+}
+
+func TestStringParamsContains(t *testing.T) {
+	p := stringParams{"key": "value"}
+
+	if !p.Contains("key") {
+		t.Error("should contain 'key'")
+	}
+	if p.Contains("missing") {
+		t.Error("should not contain 'missing'")
+	}
+}
+
+func TestAlmostEqualFloat64(t *testing.T) {
+	if !AlmostEqualFloat64(1.0, 1.0, 1e-10) {
+		t.Error("equal values should be true")
+	}
+	if !AlmostEqualFloat64(1.0, 1.0000000001, 1e-9) {
+		t.Error("close values should be true")
+	}
+	if AlmostEqualFloat64(1.0, 2.0, 1e-10) {
+		t.Error("different values should be false")
+	}
+}
+
+func TestNumMismatchedFloat64Slices(t *testing.T) {
+	a := []float64{1.0, 2.0, 3.0, 4.0}
+	b := []float64{1.0, 2.1, 3.0, 4.5}
+
+	count, err := NumMismatchedFloat64Slices(a, b, 0.05)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 mismatches, got %d", count)
+	}
+
+	count, err = NumMismatchedFloat64Slices(a, b, 1.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 mismatches with large threshold, got %d", count)
+	}
+
+	_, err = NumMismatchedFloat64Slices([]float64{1.0}, []float64{1.0, 2.0}, 0.01)
+	if err == nil {
+		t.Error("should fail for different length slices")
+	}
+}
+
+func TestFloat64FromBytes(t *testing.T) {
+	// 0.5 in IEEE 754 little-endian: 0x000000000000E03F
+	leBytes := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x3F}
+	v := Float64FromBytes(leBytes, true)
+	if v != 0.5 {
+		t.Errorf("little-endian: expected 0.5, got %f", v)
+	}
+
+	// 0.5 in IEEE 754 big-endian: 0x3FE0000000000000
+	beBytes := []byte{0x3F, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	v = Float64FromBytes(beBytes, false)
+	if v != 0.5 {
+		t.Errorf("big-endian: expected 0.5, got %f", v)
+	}
 }

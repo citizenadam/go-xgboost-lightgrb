@@ -34,6 +34,7 @@ func (t TransformType) Name() string {
 		"logistic",
 		"softmax",
 		"leaf_index",
+		"exponential",
 	}
 	if t < Raw || t > Last {
 		return "unknown"
