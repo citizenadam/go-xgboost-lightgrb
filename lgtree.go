@@ -3,7 +3,7 @@ package leaves
 import (
 	"math"
 
-	"github.com/dmitryikh/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 )
 
 const (

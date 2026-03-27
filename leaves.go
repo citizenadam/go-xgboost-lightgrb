@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/dmitryikh/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
 )
 
 // BatchSize for parallel task

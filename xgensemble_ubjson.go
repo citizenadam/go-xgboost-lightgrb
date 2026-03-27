@@ -8,10 +8,11 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 
-	"github.com/dmitryikh/leaves/internal/ubjson"
-	"github.com/dmitryikh/leaves/transformation"
-	"github.com/dmitryikh/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/ubjson"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 )
 
 // ubjsonMarkerString is the UBJSON string type marker ('S').
@@ -154,6 +155,134 @@ func decodeLearner(dec *ubjson.Decoder, l *ubjsonLearner) error {
 	return nil
 }
 
+// readFloatFlexible reads a float64 from UBJSON, handling string, numeric,
+// and single-element array formats (XGBoost 3.x wraps values in arrays).
+func readFloatFlexible(dec *ubjson.Decoder) (float64, error) {
+	tok, err := dec.Next()
+	if err != nil {
+		return 0, err
+	}
+	switch tok.Kind {
+	case ubjson.TokString:
+		return strconv.ParseFloat(strings.Trim(tok.StrVal, "[]"), 64)
+	case ubjson.TokFloat32:
+		return float64(tok.F32Val), nil
+	case ubjson.TokFloat64:
+		return tok.F64Val, nil
+	case ubjson.TokInt32:
+		// In XGBoost mode, int32 after a string key is a string length prefix.
+		buf, readErr := dec.ReadBytes(int(tok.I32Val))
+		if readErr != nil {
+			return 0, readErr
+		}
+		return strconv.ParseFloat(strings.Trim(string(buf), "[]"), 64)
+	case ubjson.TokInt8:
+		return float64(tok.I8Val), nil
+	case ubjson.TokUint8:
+		return float64(tok.U8Val), nil
+	case ubjson.TokArrayStart:
+		// XGBoost 3.x: [value] — read first element, skip rest
+		inner, innerErr := dec.Next()
+		if innerErr != nil {
+			return 0, innerErr
+		}
+		var result float64
+		switch inner.Kind {
+		case ubjson.TokString:
+			result, innerErr = strconv.ParseFloat(strings.Trim(inner.StrVal, "[]"), 64)
+		case ubjson.TokFloat32:
+			result = float64(inner.F32Val)
+		case ubjson.TokFloat64:
+			result = inner.F64Val
+		case ubjson.TokInt32:
+			result = float64(inner.I32Val)
+		default:
+			return 0, fmt.Errorf("unexpected array element type: %v", inner.Kind)
+		}
+		if innerErr != nil {
+			return 0, innerErr
+		}
+		// Consume remaining elements and array end
+		for {
+			endTok, endErr := dec.Next()
+			if endErr != nil {
+				return 0, endErr
+			}
+			if endTok.Kind == ubjson.TokArrayEnd {
+				break
+			}
+		}
+		return result, nil
+	}
+	return 0, fmt.Errorf("unexpected type for float: %v", tok.Kind)
+}
+
+// readIntFlexible reads an int from UBJSON, handling string, numeric,
+// and single-element array formats (XGBoost 3.x wraps values in arrays).
+func readIntFlexible(dec *ubjson.Decoder) (int, error) {
+	tok, err := dec.Next()
+	if err != nil {
+		return 0, err
+	}
+	switch tok.Kind {
+	case ubjson.TokString:
+		return strconv.Atoi(strings.Trim(tok.StrVal, "[]"))
+	case ubjson.TokInt32:
+		// In XGBoost mode, int32 after a string key is a string length prefix.
+		// ReadString() handles this by reading tok.I32Val bytes.
+		s, readErr := dec.ReadString()
+		if readErr != nil {
+			return 0, readErr
+		}
+		return strconv.Atoi(strings.Trim(s, "[]"))
+	case ubjson.TokInt8:
+		return int(tok.I8Val), nil
+	case ubjson.TokUint8:
+		return int(tok.U8Val), nil
+	case ubjson.TokInt16:
+		return int(tok.I16Val), nil
+	case ubjson.TokInt64:
+		return int(tok.I64Val), nil
+	case ubjson.TokArrayStart:
+		// XGBoost 3.x: [value] — read first element, consume end
+		inner, innerErr := dec.Next()
+		if innerErr != nil {
+			return 0, innerErr
+		}
+		var result int
+		switch inner.Kind {
+		case ubjson.TokString:
+			result, innerErr = strconv.Atoi(strings.Trim(inner.StrVal, "[]"))
+		case ubjson.TokInt32:
+			result = int(inner.I32Val)
+		case ubjson.TokInt8:
+			result = int(inner.I8Val)
+		case ubjson.TokUint8:
+			result = int(inner.U8Val)
+		case ubjson.TokInt16:
+			result = int(inner.I16Val)
+		case ubjson.TokInt64:
+			result = int(inner.I64Val)
+		default:
+			return 0, fmt.Errorf("unexpected array element type: %v", inner.Kind)
+		}
+		if innerErr != nil {
+			return 0, innerErr
+		}
+		for {
+			endTok, endErr := dec.Next()
+			if endErr != nil {
+				return 0, endErr
+			}
+			if endTok.Kind == ubjson.TokArrayEnd {
+				break
+			}
+		}
+		return result, nil
+	}
+	return 0, fmt.Errorf("unexpected type for int: %v", tok.Kind)
+}
+
 func decodeLearnerModelParam(dec *ubjson.Decoder, p *ubjsonLearnerModelParam) error {
 	if err := dec.ExpectObjectStart(); err != nil {
 		return err
@@ -173,32 +302,21 @@ func decodeLearnerModelParam(dec *ubjson.Decoder, p *ubjsonLearnerModelParam) er
 
 		switch tok.StrVal {
 		case "base_score":
-			s, err := dec.ReadString()
+			v, err := readFloatFlexible(dec)
 			if err != nil {
-				return err
+				return fmt.Errorf("parsing base_score: %w", err)
 			}
-			p.BaseScore, err = strconv.ParseFloat(s, 64)
-			if err != nil {
-				return fmt.Errorf("parsing base_score %q: %w", s, err)
-			}
+			p.BaseScore = v
 		case "num_class":
-			s, err := dec.ReadString()
+			v, err := readIntFlexible(dec)
 			if err != nil {
-				return err
-			}
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				return fmt.Errorf("parsing num_class %q: %w", s, err)
+				return fmt.Errorf("parsing num_class: %w", err)
 			}
 			p.NumClass = v
 		case "num_feature":
-			s, err := dec.ReadString()
+			v, err := readIntFlexible(dec)
 			if err != nil {
-				return err
-			}
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				return fmt.Errorf("parsing num_feature %q: %w", s, err)
+				return fmt.Errorf("parsing num_feature: %w", err)
 			}
 			p.NumFeature = v
 		default:
@@ -347,25 +465,30 @@ func decodeGBTreeModelParam(dec *ubjson.Decoder, m *ubjsonGBTreeModel) error {
 
 func decodeTrees(dec *ubjson.Decoder, m *ubjsonGBTreeModel) error {
 	if err := dec.ExpectArrayStart(); err != nil {
-		return err
+		return fmt.Errorf("decodeTrees: expect array start: %w", err)
 	}
 
+	treeIdx := 0
 	for {
 		tok, err := dec.Next()
 		if err != nil {
-			return err
+			return fmt.Errorf("decodeTrees: next token: %w", err)
 		}
+		fmt.Printf("DEBUG decodeTrees[%d]: got token kind=%d\n", treeIdx, int(tok.Kind))
 		if tok.Kind == ubjson.TokArrayEnd {
+			fmt.Printf("DEBUG decodeTrees: found array end, done\n")
 			break
 		}
 		if tok.Kind != ubjson.TokObjectStart {
-			return fmt.Errorf("expected tree object, got %v", tok.Kind)
+			return fmt.Errorf("decodeTrees: expected tree object, got %v (kind=%d)", tok.Kind, int(tok.Kind))
 		}
 
 		tree, err := decodeTree(dec)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("DEBUG decodeTrees[%d]: decoded tree id=%d, numNodes=%d\n", treeIdx, tree.ID, tree.NumNodes)
+		treeIdx++
 		m.Trees = append(m.Trees, tree)
 	}
 	return nil
@@ -377,9 +500,11 @@ func decodeTree(dec *ubjson.Decoder) (ubjsonTree, error) {
 	for {
 		tok, err := dec.Next()
 		if err != nil {
-			return tree, err
+			return tree, fmt.Errorf("decodeTree: next token: %w", err)
 		}
+		fmt.Printf("DEBUG decodeTree: got token kind=%d\n", int(tok.Kind))
 		if tok.Kind == ubjson.TokObjectEnd {
+			fmt.Printf("DEBUG decodeTree: found object end, returning\n")
 			break
 		}
 		if tok.Kind != ubjson.TokKey {
@@ -943,31 +1068,48 @@ func jsonLearnerFromMap(raw map[string]interface{}, l *ubjsonLearner) error {
 }
 
 func jsonLearnerModelParamFromMap(raw map[string]interface{}, p *ubjsonLearnerModelParam) error {
-	if bs, ok := raw["base_score"].(string); ok {
-		v, err := strconv.ParseFloat(bs, 64)
-		if err != nil {
-			return fmt.Errorf("parsing base_score: %w", err)
-		}
-		p.BaseScore = v
+	p.BaseScore = jsonParseFloatFlexible(raw["base_score"])
+	if nc, ok := raw["num_class"]; ok {
+		p.NumClass = jsonParseIntFlexible(nc)
 	}
-
-	if nc, ok := raw["num_class"].(string); ok {
-		v, err := strconv.Atoi(nc)
-		if err != nil {
-			return fmt.Errorf("parsing num_class: %w", err)
-		}
-		p.NumClass = v
+	if nf, ok := raw["num_feature"]; ok {
+		p.NumFeature = jsonParseIntFlexible(nf)
 	}
-
-	if nf, ok := raw["num_feature"].(string); ok {
-		v, err := strconv.Atoi(nf)
-		if err != nil {
-			return fmt.Errorf("parsing num_feature: %w", err)
-		}
-		p.NumFeature = v
-	}
-
 	return nil
+}
+
+func jsonParseFloatFlexible(v interface{}) float64 {
+	switch val := v.(type) {
+	case string:
+		s := strings.Trim(val, "[]")
+		if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			return f
+		}
+	case float64:
+		return val
+	case []interface{}:
+		if len(val) > 0 {
+			return jsonParseFloatFlexible(val[0])
+		}
+	}
+	return 0
+}
+
+func jsonParseIntFlexible(v interface{}) int {
+	switch val := v.(type) {
+	case string:
+		s := strings.Trim(val, "[]")
+		if i, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			return i
+		}
+	case float64:
+		return int(val)
+	case []interface{}:
+		if len(val) > 0 {
+			return jsonParseIntFlexible(val[0])
+		}
+	}
+	return 0
 }
 
 func jsonGradientBoosterFromMap(raw map[string]interface{}, gb *ubjsonGradientBooster) error {

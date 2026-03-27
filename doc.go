@@ -43,9 +43,9 @@ predict_breast_cancer_model.go:
 	import (
 		"fmt"
 
-		"github.com/dmitryikh/leaves"
-		"github.com/dmitryikh/leaves/mat"
-		"github.com/dmitryikh/leaves/util"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves/mat"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 	)
 
 	func main() {
@@ -141,9 +141,9 @@ predict_iris_model.go:
 	import (
 		"fmt"
 
-		"github.com/dmitryikh/leaves"
-		"github.com/dmitryikh/leaves/mat"
-		"github.com/dmitryikh/leaves/util"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves/mat"
+		"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 	)
 
 	func main() {

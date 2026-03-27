@@ -649,3 +649,406 @@ func TestDecoderHighPrecision(t *testing.T) {
 		t.Errorf("expected '1.234', got %v", tok)
 	}
 }
+
+// Helper to build XGBoost-style UBJSON: {L <count> l <keylen> <key> l <vallen> <val> ...}
+func xgbObject(keyValPairs ...string) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(markerObjectStart)
+	buf.WriteByte(markerInt64) // 'L'
+	countBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(countBuf, uint64(len(keyValPairs)/2))
+	buf.Write(countBuf)
+
+	for i := 0; i < len(keyValPairs); i += 2 {
+		key := keyValPairs[i]
+		val := keyValPairs[i+1]
+
+		// Key: l <4 bytes> <key bytes>
+		buf.WriteByte(markerInt32) // 'l'
+		lenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(key)))
+		buf.Write(lenBuf)
+		buf.WriteString(key)
+
+		// Value: l <4 bytes> <val bytes>
+		buf.WriteByte(markerInt32) // 'l'
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(val)))
+		buf.Write(lenBuf)
+		buf.WriteString(val)
+	}
+
+	buf.WriteByte(markerObjectEnd)
+	return buf.Bytes()
+}
+
+// Helper to build XGBoost-style UBJSON with mixed value types.
+// Pairs are string: either "key:stringVal" or "key:SKIP" (SkipValue).
+type xgbEntry struct {
+	key   string
+	isStr bool
+	val   string // only used if isStr
+}
+
+func xgbObjectMixed(entries ...xgbEntry) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(markerObjectStart)
+	buf.WriteByte(markerInt64) // 'L'
+	countBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(countBuf, uint64(len(entries)))
+	buf.Write(countBuf)
+
+	for _, e := range entries {
+		// Key: l <4 bytes> <key bytes>
+		buf.WriteByte(markerInt32) // 'l'
+		lenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(e.key)))
+		buf.Write(lenBuf)
+		buf.WriteString(e.key)
+
+		if e.isStr {
+			// String value: l <4 bytes> <val bytes>
+			buf.WriteByte(markerInt32) // 'l'
+			binary.BigEndian.PutUint32(lenBuf, uint32(len(e.val)))
+			buf.Write(lenBuf)
+			buf.WriteString(e.val)
+		}
+		// else value will be written externally
+	}
+	return buf.Bytes()
+}
+
+func TestDecoderXGBoostCountedObject(t *testing.T) {
+	// XGBoost format: {L 2 l 5 first l 6 second l 5 value l 6 value2 }
+	data := xgbObject("first", "value", "second", "value2")
+	d := NewDecoder(bytes.NewReader(data))
+
+	// Object start
+	tok, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectStart {
+		t.Fatalf("expected TokObjectStart, got %v", tok.Kind)
+	}
+
+	// First key
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "first" {
+		t.Fatalf("expected TokKey 'first', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// First value (ReadString handles int32 length prefix)
+	s, err := d.ReadString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s != "value" {
+		t.Errorf("expected 'value', got %q", s)
+	}
+
+	// Second key
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "second" {
+		t.Fatalf("expected TokKey 'second', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Second value
+	s, err = d.ReadString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s != "value2" {
+		t.Errorf("expected 'value2', got %q", s)
+	}
+
+	// Object end
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectEnd {
+		t.Fatalf("expected TokObjectEnd, got %v", tok.Kind)
+	}
+}
+
+func TestDecoderXGBoostNestedObjects(t *testing.T) {
+	// Outer: XGBoost format {L 1 l 4 data <inner_object> }
+	// Inner: standard UBJSON { S i 8 innerkey S i 10 innervalue }
+	var innerBuf bytes.Buffer
+	innerBuf.WriteByte(markerObjectStart)
+	innerBuf.WriteByte(markerString)
+	innerBuf.WriteByte(8) // "innerkey" length
+	innerBuf.WriteString("innerkey")
+	innerBuf.WriteByte(markerString)
+	innerBuf.WriteByte(10) // "innervalue" length
+	innerBuf.WriteString("innervalue")
+	innerBuf.WriteByte(markerObjectEnd)
+	innerObj := innerBuf.Bytes()
+
+	var buf bytes.Buffer
+	buf.WriteByte(markerObjectStart)
+	buf.WriteByte(markerInt64) // 'L'
+	countBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(countBuf, 1)
+	buf.Write(countBuf)
+
+	// Key: "data"
+	key := "data"
+	buf.WriteByte(markerInt32)
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(key)))
+	buf.Write(lenBuf)
+	buf.WriteString(key)
+
+	// Value: nested standard UBJSON object
+	buf.Write(innerObj)
+
+	buf.WriteByte(markerObjectEnd)
+	data := buf.Bytes()
+
+	d := NewDecoder(bytes.NewReader(data))
+
+	// Outer object start
+	tok, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectStart {
+		t.Fatalf("expected TokObjectStart, got %v", tok.Kind)
+	}
+
+	// Outer key: "data"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "data" {
+		t.Fatalf("expected TokKey 'data', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Inner object start
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectStart {
+		t.Fatalf("expected TokObjectStart (inner), got %v", tok.Kind)
+	}
+
+	// Inner key: "innerkey"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "innerkey" {
+		t.Fatalf("expected TokKey 'innerkey', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Inner value: "innervalue"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokString || tok.StrVal != "innervalue" {
+		t.Fatalf("expected TokString 'innervalue', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Inner object end
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectEnd {
+		t.Fatalf("expected TokObjectEnd (inner), got %v", tok.Kind)
+	}
+
+	// Outer object end
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectEnd {
+		t.Fatalf("expected TokObjectEnd (outer), got %v", tok.Kind)
+	}
+}
+
+func TestDecoderXGBoostSkipValue(t *testing.T) {
+	// Object with a value to skip: {L 1 l 4 keep l 4 val1 l 4 skip l 10 longval }
+	var buf bytes.Buffer
+	buf.WriteByte(markerObjectStart)
+	buf.WriteByte(markerInt64) // 'L'
+	countBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(countBuf, 2)
+	buf.Write(countBuf)
+
+	// Key: "keep"
+	key1 := "keep"
+	buf.WriteByte(markerInt32)
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(key1)))
+	buf.Write(lenBuf)
+	buf.WriteString(key1)
+
+	// Value: "val1"
+	val1 := "val1"
+	buf.WriteByte(markerInt32)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(val1)))
+	buf.Write(lenBuf)
+	buf.WriteString(val1)
+
+	// Key: "skip"
+	key2 := "skip"
+	buf.WriteByte(markerInt32)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(key2)))
+	buf.Write(lenBuf)
+	buf.WriteString(key2)
+
+	// Value: "longvalue!" (will be skipped)
+	val2 := "longvalue!"
+	buf.WriteByte(markerInt32)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(val2)))
+	buf.Write(lenBuf)
+	buf.WriteString(val2)
+
+	buf.WriteByte(markerObjectEnd)
+	data := buf.Bytes()
+
+	d := NewDecoder(bytes.NewReader(data))
+
+	// Object start
+	tok, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectStart {
+		t.Fatalf("expected TokObjectStart, got %v", tok.Kind)
+	}
+
+	// Key: "keep"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "keep" {
+		t.Fatalf("expected TokKey 'keep', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Value: "val1"
+	s, err := d.ReadString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s != "val1" {
+		t.Errorf("expected 'val1', got %q", s)
+	}
+
+	// Key: "skip"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "skip" {
+		t.Fatalf("expected TokKey 'skip', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Skip the value
+	if err := d.SkipValue(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Object end
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectEnd {
+		t.Fatalf("expected TokObjectEnd, got %v", tok.Kind)
+	}
+}
+
+func TestDecoderStandardRegression(t *testing.T) {
+	// Standard UBJSON: { S i 5 first S i 5 value S i 6 second S i 6 value2 }
+	var buf bytes.Buffer
+	buf.WriteByte(markerObjectStart)
+
+	buf.WriteByte(markerString)
+	buf.WriteByte(5) // key length
+	buf.WriteString("first")
+
+	buf.WriteByte(markerString)
+	buf.WriteByte(5) // value length
+	buf.WriteString("value")
+
+	buf.WriteByte(markerString)
+	buf.WriteByte(6) // key length
+	buf.WriteString("second")
+
+	buf.WriteByte(markerString)
+	buf.WriteByte(6) // value length
+	buf.WriteString("value2")
+
+	buf.WriteByte(markerObjectEnd)
+	data := buf.Bytes()
+
+	d := NewDecoder(bytes.NewReader(data))
+
+	// Object start
+	tok, err := d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectStart {
+		t.Fatalf("expected TokObjectStart, got %v", tok.Kind)
+	}
+
+	// Key: "first"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "first" {
+		t.Fatalf("expected TokKey 'first', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Value: "value"
+	s, err := d.ReadString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s != "value" {
+		t.Errorf("expected 'value', got %q", s)
+	}
+
+	// Key: "second"
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokKey || tok.StrVal != "second" {
+		t.Fatalf("expected TokKey 'second', got %v %q", tok.Kind, tok.StrVal)
+	}
+
+	// Value: "value2"
+	s, err = d.ReadString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s != "value2" {
+		t.Errorf("expected 'value2', got %q", s)
+	}
+
+	// Object end
+	tok, err = d.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Kind != TokObjectEnd {
+		t.Fatalf("expected TokObjectEnd, got %v", tok.Kind)
+	}
+}

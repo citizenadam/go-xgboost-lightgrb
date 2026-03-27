@@ -3,16 +3,17 @@ package leaves
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/dmitryikh/leaves/internal/ubjson"
-	"github.com/dmitryikh/leaves/mat"
-	"github.com/dmitryikh/leaves/transformation"
-	"github.com/dmitryikh/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/ubjson"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/mat"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 )
 
 // --- UBJSON encoder for test model construction ---
@@ -1021,6 +1022,547 @@ func TestXGJSONAutoDetect(t *testing.T) {
 	model, err := XGEnsembleFromAnyFile(tmpFile, false)
 	if err != nil {
 		t.Fatalf("XGEnsembleFromAnyFile for JSON failed: %v", err)
+	}
+
+	if model.NEstimators() != 1 {
+		t.Errorf("NEstimators = %d, want 1", model.NEstimators())
+	}
+}
+
+// --- XGBoost native UBJSON format tests ---
+
+// xgbWriter writes XGBoost's non-standard UBJSON format:
+// Objects use {L <count> ...} with keys/values as <int-marker><length><bytes> (no 'S' marker).
+type xgbWriter struct {
+	buf bytes.Buffer
+}
+
+func newXGBWriter() *xgbWriter {
+	return &xgbWriter{}
+}
+
+func (w *xgbWriter) writeObjectStart(count int) {
+	w.buf.WriteByte('{')
+	w.buf.WriteByte('L') // int64 marker
+	binary.Write(&w.buf, binary.BigEndian, int64(count))
+}
+
+func (w *xgbWriter) writeObjectEnd() {
+	w.buf.WriteByte('}')
+}
+
+func (w *xgbWriter) writeArrayStart() {
+	w.buf.WriteByte('[')
+}
+
+func (w *xgbWriter) writeArrayEnd() {
+	w.buf.WriteByte(']')
+}
+
+func (w *xgbWriter) writeKey(s string) {
+	w.buf.WriteByte('l') // int32 length prefix (no 'S' marker)
+	binary.Write(&w.buf, binary.BigEndian, int32(len(s)))
+	w.buf.WriteString(s)
+}
+
+func (w *xgbWriter) writeString(s string) {
+	w.buf.WriteByte('l') // int32 length prefix (no 'S' marker)
+	binary.Write(&w.buf, binary.BigEndian, int32(len(s)))
+	w.buf.WriteString(s)
+}
+
+func (w *xgbWriter) writeInt32(v int32) {
+	w.buf.WriteByte('l')
+	binary.Write(&w.buf, binary.BigEndian, v)
+}
+
+func (w *xgbWriter) writeInt32Slice(vals []int32) {
+	w.buf.WriteByte('$')
+	w.buf.WriteByte('l')
+	w.buf.WriteByte('#')
+	w.buf.WriteByte('l')
+	binary.Write(&w.buf, binary.BigEndian, int32(len(vals)))
+	for _, v := range vals {
+		binary.Write(&w.buf, binary.BigEndian, v)
+	}
+}
+
+func (w *xgbWriter) writeUint8Slice(vals []uint8) {
+	w.buf.WriteByte('$')
+	w.buf.WriteByte('U')
+	w.buf.WriteByte('#')
+	w.buf.WriteByte('l')
+	binary.Write(&w.buf, binary.BigEndian, int32(len(vals)))
+	for _, v := range vals {
+		w.buf.WriteByte(v)
+	}
+}
+
+func (w *xgbWriter) writeFloat32Slice(vals []float32) {
+	w.buf.WriteByte('$')
+	w.buf.WriteByte('d')
+	w.buf.WriteByte('#')
+	w.buf.WriteByte('l')
+	binary.Write(&w.buf, binary.BigEndian, int32(len(vals)))
+	for _, v := range vals {
+		bits := math.Float32bits(v)
+		binary.Write(&w.buf, binary.BigEndian, bits)
+	}
+}
+
+func (w *xgbWriter) Bytes() []byte {
+	return w.buf.Bytes()
+}
+
+// createTestXGBoostNativeUBJSON creates a minimal XGBoost model in XGBoost 3.x's
+// native UBJSON format (with {L count and l <4-byte> key/value prefixes).
+func createTestXGBoostNativeUBJSON() []byte {
+	w := newXGBWriter()
+
+	// Top-level model object: 1 entry
+	w.writeObjectStart(1)
+	w.writeKey("learner")
+
+	// learner object: 4 entries (learner_model_param, gradient_booster, attributes, objective/feature_names)
+	w.writeObjectStart(4)
+	w.writeKey("learner_model_param")
+	w.writeObjectStart(3)
+	w.writeKey("base_score")
+	w.writeString("0.5")
+	w.writeKey("num_class")
+	w.writeString("1")
+	w.writeKey("num_feature")
+	w.writeString("2")
+	w.writeObjectEnd()
+
+	w.writeKey("gradient_booster")
+	w.writeObjectStart(2)
+	w.writeKey("name")
+	w.writeString("gbtree")
+	w.writeKey("model")
+	w.writeObjectStart(3)
+	w.writeKey("gbtree_model_param")
+	w.writeObjectStart(2)
+	w.writeKey("num_trees")
+	w.writeString("1")
+	w.writeKey("num_parallel_tree")
+	w.writeString("1")
+	w.writeObjectEnd()
+
+	w.writeKey("tree_info")
+	w.writeArrayStart()
+	w.writeInt32(0)
+	w.writeArrayEnd()
+
+	w.writeKey("trees")
+	w.writeArrayStart()
+
+	// Tree 0
+	w.writeObjectStart(11)
+	w.writeKey("id")
+	w.writeInt32(0)
+	w.writeKey("left_children")
+	w.writeInt32Slice([]int32{1, -1, -1})
+	w.writeKey("right_children")
+	w.writeInt32Slice([]int32{2, -1, -1})
+	w.writeKey("parents")
+	w.writeInt32Slice([]int32{-1, 0, 0})
+	w.writeKey("split_conditions")
+	w.writeFloat32Slice([]float32{0.5, -1.0, 1.0})
+	w.writeKey("split_indices")
+	w.writeInt32Slice([]int32{0, 0, 0})
+	w.writeKey("split_type")
+	w.writeUint8Slice([]uint8{0, 0, 0})
+	w.writeKey("default_left")
+	w.writeUint8Slice([]uint8{1, 0, 0})
+	w.writeKey("base_weights")
+	w.writeFloat32Slice([]float32{1.0, -1.0, 1.0})
+	w.writeKey("loss_changes")
+	w.writeFloat32Slice([]float32{1.0, 0.0, 0.0})
+	w.writeKey("sum_hessian")
+	w.writeFloat32Slice([]float32{100.0, 40.0, 60.0})
+	w.writeKey("num_nodes")
+	w.writeInt32(3)
+	w.writeObjectEnd() // tree 0
+
+	w.writeArrayEnd() // trees
+
+	w.writeObjectEnd() // model
+	w.writeObjectEnd() // gradient_booster
+
+	w.writeKey("attributes")
+	w.writeObjectStart(1)
+	w.writeKey("objective")
+	w.writeString("binary:logistic")
+	w.writeObjectEnd()
+
+	w.writeObjectEnd() // learner
+	w.writeObjectEnd() // top-level
+
+	return w.Bytes()
+}
+
+// createTestXGBoostNativeUBJSONArrayBaseScore creates a model where base_score
+// is an array [0.5] instead of a string "0.5" (XGBoost 3.x format).
+func createTestXGBoostNativeUBJSONArrayBaseScore() []byte {
+	w := newXGBWriter()
+
+	w.writeObjectStart(1)
+	w.writeKey("learner")
+
+	w.writeObjectStart(4)
+	w.writeKey("learner_model_param")
+	w.writeObjectStart(3)
+	w.writeKey("base_score")
+	// Write base_score as a single-element array
+	w.buf.WriteByte('[')
+	w.buf.WriteByte('d') // float32
+	bits := math.Float32bits(0.5)
+	binary.Write(&w.buf, binary.BigEndian, bits)
+	w.buf.WriteByte(']')
+	w.writeKey("num_class")
+	w.writeString("1")
+	w.writeKey("num_feature")
+	w.writeString("2")
+	w.writeObjectEnd()
+
+	w.writeKey("gradient_booster")
+	w.writeObjectStart(2)
+	w.writeKey("name")
+	w.writeString("gbtree")
+	w.writeKey("model")
+	w.writeObjectStart(3)
+	w.writeKey("gbtree_model_param")
+	w.writeObjectStart(2)
+	w.writeKey("num_trees")
+	w.writeString("1")
+	w.writeKey("num_parallel_tree")
+	w.writeString("1")
+	w.writeObjectEnd()
+
+	w.writeKey("tree_info")
+	w.writeArrayStart()
+	w.writeInt32(0)
+	w.writeArrayEnd()
+
+	w.writeKey("trees")
+	w.writeArrayStart()
+
+	w.writeObjectStart(11)
+	w.writeKey("id")
+	w.writeInt32(0)
+	w.writeKey("left_children")
+	w.writeInt32Slice([]int32{1, -1, -1})
+	w.writeKey("right_children")
+	w.writeInt32Slice([]int32{2, -1, -1})
+	w.writeKey("parents")
+	w.writeInt32Slice([]int32{-1, 0, 0})
+	w.writeKey("split_conditions")
+	w.writeFloat32Slice([]float32{0.5, -1.0, 1.0})
+	w.writeKey("split_indices")
+	w.writeInt32Slice([]int32{0, 0, 0})
+	w.writeKey("split_type")
+	w.writeUint8Slice([]uint8{0, 0, 0})
+	w.writeKey("default_left")
+	w.writeUint8Slice([]uint8{1, 0, 0})
+	w.writeKey("base_weights")
+	w.writeFloat32Slice([]float32{1.0, -1.0, 1.0})
+	w.writeKey("loss_changes")
+	w.writeFloat32Slice([]float32{1.0, 0.0, 0.0})
+	w.writeKey("sum_hessian")
+	w.writeFloat32Slice([]float32{100.0, 40.0, 60.0})
+	w.writeKey("num_nodes")
+	w.writeInt32(3)
+	w.writeObjectEnd()
+
+	w.writeArrayEnd()  // trees
+	w.writeObjectEnd() // model
+	w.writeObjectEnd() // gradient_booster
+
+	w.writeKey("attributes")
+	w.writeObjectStart(1)
+	w.writeKey("objective")
+	w.writeString("binary:logistic")
+	w.writeObjectEnd()
+
+	w.writeObjectEnd() // learner
+	w.writeObjectEnd()
+
+	return w.Bytes()
+}
+
+func TestXGBoostNativeUBJSONDebug(t *testing.T) {
+	data := createTestXGBoostNativeUBJSON()
+
+	// Find "num_nodes" in the data and print surrounding bytes
+	idx := bytes.Index(data, []byte("num_nodes"))
+	t.Logf("num_nodes at position %d", idx)
+	t.Logf("Bytes around num_nodes: %x", data[idx:idx+20])
+
+	// Find the position after num_nodes int32 value
+	// num_nodes key: l + 4bytes + "num_nodes" = 1 + 4 + 9 = 14 bytes
+	// num_nodes value: l + 4bytes = 1 + 4 = 5 bytes
+	// So after num_nodes value: idx + 14 + 5 = idx + 19
+	afterNumNodes := idx + 19
+	t.Logf("After num_nodes value (position %d): %x", afterNumNodes, data[afterNumNodes:afterNumNodes+20])
+
+	dec := ubjson.NewDecoder(bytes.NewReader(data))
+	for i := 0; i < 60; i++ {
+		tok, err := dec.Next()
+		if err != nil {
+			t.Logf("Token %d: ERROR: %v", i, err)
+			break
+		}
+		desc := fmt.Sprintf("Kind=%d", tok.Kind)
+		if tok.Kind == ubjson.TokKey {
+			desc += fmt.Sprintf(" Key=%q", tok.StrVal)
+		} else if tok.Kind == ubjson.TokString {
+			desc += fmt.Sprintf(" StrVal=%q", tok.StrVal)
+		} else if tok.Kind == ubjson.TokInt32 {
+			desc += fmt.Sprintf(" I32Val=%d", tok.I32Val)
+		}
+		t.Logf("Token %d: %s", i, desc)
+	}
+}
+
+func TestXGBoostNativeUBJSONArrayBaseScoreDebug(t *testing.T) {
+	data := createTestXGBoostNativeUBJSONArrayBaseScore()
+	dec := ubjson.NewDecoder(bytes.NewReader(data))
+	for i := 0; i < 80; i++ {
+		tok, err := dec.Next()
+		if err != nil {
+			t.Logf("Token %d: ERROR: %v", i, err)
+			break
+		}
+		desc := fmt.Sprintf("Kind=%d", tok.Kind)
+		if tok.Kind == ubjson.TokKey {
+			desc += fmt.Sprintf(" Key=%q", tok.StrVal)
+		} else if tok.Kind == ubjson.TokString {
+			desc += fmt.Sprintf(" StrVal=%q", tok.StrVal)
+		} else if tok.Kind == ubjson.TokInt32 {
+			desc += fmt.Sprintf(" I32Val=%d", tok.I32Val)
+		} else if tok.Kind == ubjson.TokFloat32 {
+			desc += fmt.Sprintf(" F32Val=%v", tok.F32Val)
+		} else if tok.Kind == ubjson.TokArrayStart {
+			desc += " ["
+		} else if tok.Kind == ubjson.TokArrayEnd {
+			desc += " ]"
+		}
+		t.Logf("Token %d: %s", i, desc)
+	}
+}
+
+func TestXGBoostNativeUBJSON(t *testing.T) {
+	data := createTestXGBoostNativeUBJSON()
+
+	// Print the last 50 bytes to verify structure
+	t.Logf("Last 50 bytes of data: %v", data[len(data)-50:])
+	t.Logf("As hex: %x", data[len(data)-50:])
+
+	model, err := XGEnsembleFromUBJSON(bytes.NewReader(data), false)
+	if err != nil {
+		t.Fatalf("XGEnsembleFromUBJSON (native format) failed: %v", err)
+	}
+
+	if model.NEstimators() != 1 {
+		t.Errorf("NEstimators = %d, want 1", model.NEstimators())
+	}
+
+	// Verify predictions work
+	fvals := []float64{0.0, 0.0, 1.0, 1.0}
+	predictions := make([]float64, 2)
+	model.PredictDense(fvals, 2, 2, predictions, 0, 1)
+	if len(predictions) != 2 {
+		t.Fatalf("expected 2 predictions, got %d", len(predictions))
+	}
+}
+
+func TestXGBoostNativeUBJSONArrayBaseScore(t *testing.T) {
+	data := createTestXGBoostNativeUBJSONArrayBaseScore()
+	model, err := XGEnsembleFromUBJSON(bytes.NewReader(data), false)
+	if err != nil {
+		t.Fatalf("XGEnsembleFromUBJSON (array base_score) failed: %v", err)
+	}
+
+	if model.NEstimators() != 1 {
+		t.Errorf("NEstimators = %d, want 1", model.NEstimators())
+	}
+
+	// Verify predictions work
+	fvals := []float64{0.0, 0.0}
+	predictions := make([]float64, 1)
+	model.PredictDense(fvals, 1, 2, predictions, 0, 1)
+	if len(predictions) != 1 {
+		t.Fatalf("expected 1 prediction, got %d", len(predictions))
+	}
+}
+
+// TestXGBoostSimpleObjectEnd tests that after reading an int32 value with peek,
+// the next ObjectEnd marker is correctly read.
+func TestXGBoostSimpleObjectEnd(t *testing.T) {
+	// Create: { "num_nodes" l 00 00 00 03 } } } } { "attributes" l ... }
+	// After the object with num_nodes ends, we should read } } } (object, array, object ends)
+	// Then { for attributes object
+
+	// Build: {L <count=1> l<num_nodes_len> "num_nodes" l<value> } ] } } l<attr_len> "attributes" ...
+	// But simpler: just test the int32 value followed by objects
+
+	// Create a simple object: { "a" l 00 00 00 01 }
+	// In XGBoost format: {L l l<1> "a" l<1> <int32bytes> }
+	w := newXGBWriter()
+	w.writeObjectStart(1)
+	w.writeKey("a")
+	w.writeInt32(1)
+	w.writeObjectEnd()
+
+	data := w.Bytes()
+
+	dec := ubjson.NewDecoder(bytes.NewReader(data))
+
+	// Read ObjectStart
+	tok, err := dec.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+	if tok.Kind != ubjson.TokObjectStart {
+		t.Fatalf("expected ObjectStart, got %v", tok.Kind)
+	}
+
+	// Read key "a"
+	tok, err = dec.Next()
+	if err != nil {
+		t.Fatalf("Next() for key: %v", err)
+	}
+	if tok.Kind != ubjson.TokKey || tok.StrVal != "a" {
+		t.Fatalf("expected key 'a', got %v", tok.Kind)
+	}
+
+	// Read int32 value
+	tok, err = dec.Next()
+	if err != nil {
+		t.Fatalf("Next() for value: %v", err)
+	}
+	if tok.Kind != ubjson.TokInt32 || tok.I32Val != 1 {
+		t.Fatalf("expected int32 value 1, got kind=%v val=%d", tok.Kind, tok.I32Val)
+	}
+
+	// Read ObjectEnd - this should use the peeked byte '}'
+	tok, err = dec.Next()
+	if err != nil {
+		t.Fatalf("Next() for ObjectEnd: %v", err)
+	}
+	if tok.Kind != ubjson.TokObjectEnd {
+		t.Fatalf("expected ObjectEnd, got %v", tok.Kind)
+	}
+
+	// Now we're at EOF (no more data)
+	tok, err = dec.Next()
+	if err == nil {
+		t.Fatalf("expected EOF, got token %v", tok.Kind)
+	}
+}
+
+func TestXGJSONBaseScoreBracketedString(t *testing.T) {
+	jsonData := `{
+		"version": [1, 6, 0],
+		"learner": {
+			"learner_model_param": {
+				"base_score": "[1.075E-1]",
+				"num_class": "1",
+				"num_feature": "2"
+			},
+			"gradient_booster": {
+				"name": "gbtree",
+				"model": {
+					"gbtree_model_param": {
+						"num_trees": "1",
+						"num_parallel_tree": "1"
+					},
+					"tree_info": [0],
+					"trees": [{
+						"id": 0,
+						"left_children": [-1],
+						"right_children": [-1],
+						"parents": [-1],
+						"split_conditions": [1.0],
+						"split_indices": [0],
+						"split_type": [0],
+						"default_left": [0],
+						"base_weights": [1.0],
+						"loss_changes": [0.0],
+						"sum_hessian": [100.0],
+						"num_nodes": 1
+					}]
+				}
+			},
+			"attributes": {
+				"objective": "binary:logistic"
+			}
+		}
+	}`
+
+	tmpFile := filepath.Join(t.TempDir(), "test_model.json")
+	if err := os.WriteFile(tmpFile, []byte(jsonData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := XGEnsembleFromAnyFile(tmpFile, false)
+	if err != nil {
+		t.Fatalf("XGEnsembleFromAnyFile (bracketed base_score) failed: %v", err)
+	}
+
+	if model.NEstimators() != 1 {
+		t.Errorf("NEstimators = %d, want 1", model.NEstimators())
+	}
+}
+
+func TestXGJSONBaseScoreArray(t *testing.T) {
+	jsonData := `{
+		"version": [1, 6, 0],
+		"learner": {
+			"learner_model_param": {
+				"base_score": [0.5],
+				"num_class": "1",
+				"num_feature": "2"
+			},
+			"gradient_booster": {
+				"name": "gbtree",
+				"model": {
+					"gbtree_model_param": {
+						"num_trees": "1",
+						"num_parallel_tree": "1"
+					},
+					"tree_info": [0],
+					"trees": [{
+						"id": 0,
+						"left_children": [-1],
+						"right_children": [-1],
+						"parents": [-1],
+						"split_conditions": [1.0],
+						"split_indices": [0],
+						"split_type": [0],
+						"default_left": [0],
+						"base_weights": [1.0],
+						"loss_changes": [0.0],
+						"sum_hessian": [100.0],
+						"num_nodes": 1
+					}]
+				}
+			},
+			"attributes": {
+				"objective": "binary:logistic"
+			}
+		}
+	}`
+
+	tmpFile := filepath.Join(t.TempDir(), "test_model.json")
+	if err := os.WriteFile(tmpFile, []byte(jsonData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := XGEnsembleFromAnyFile(tmpFile, false)
+	if err != nil {
+		t.Fatalf("XGEnsembleFromAnyFile (array base_score) failed: %v", err)
 	}
 
 	if model.NEstimators() != 1 {

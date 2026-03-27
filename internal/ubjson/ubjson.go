@@ -100,10 +100,16 @@ type Token struct {
 // Decoder is a pull-based UBJSON decoder optimized for XGBoost model files.
 // It reads UBJSON tokens sequentially from an io.Reader.
 type Decoder struct {
-	r         io.Reader
-	buf       [8]byte
-	objDepth  int  // nesting depth of objects (for key detection)
-	expectKey bool // next string in object context should be a key
+	r          io.Reader
+	buf        [8]byte
+	peekedByte byte   // byte read ahead for format detection
+	hasPeek    bool   // whether peekedByte is valid
+	objDepth   int    // nesting depth of objects (for key detection)
+	arrayDepth int    // nesting depth of arrays (for XGBoost value disambiguation)
+	expectKey  bool   // next string in object context should be a key
+	xgbMode    bool   // true when inside an XGBoost-style counted object
+	xgbStack   []bool // stack tracking which object levels are XGBoost format
+	streamPos  int    // position in stream for debugging
 }
 
 // NewDecoder creates a new UBJSON decoder reading from r.
@@ -112,11 +118,35 @@ func NewDecoder(r io.Reader) *Decoder {
 }
 
 func (d *Decoder) readByte() (byte, error) {
+	d.streamPos++
+	if d.hasPeek {
+		b := d.peekedByte
+		d.hasPeek = false
+		fmt.Printf("DEBUG readByte[%d]: using peeked byte 0x%02x ('%c')\n", d.streamPos, b, b)
+		return b, nil
+	}
 	_, err := io.ReadFull(d.r, d.buf[:1])
 	if err != nil {
 		return 0, err
 	}
+	fmt.Printf("DEBUG readByte[%d]: read new byte 0x%02x ('%c')\n", d.streamPos, d.buf[0], d.buf[0])
 	return d.buf[0], nil
+}
+
+// peekByte reads the next byte without consuming it.
+// Stores in d.peekedByte so readByte() and readInt32/readFloat32 etc can use it.
+// Subsequent calls to peekByte return the same byte.
+func (d *Decoder) peekByte() (byte, error) {
+	if d.hasPeek {
+		return d.peekedByte, nil
+	}
+	_, err := io.ReadFull(d.r, d.buf[:1])
+	if err != nil {
+		return 0, err
+	}
+	d.peekedByte = d.buf[0]
+	d.hasPeek = true
+	return d.peekedByte, nil
 }
 
 func (d *Decoder) readFull(n int) ([]byte, error) {
@@ -125,6 +155,29 @@ func (d *Decoder) readFull(n int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return buf, nil
+}
+
+// readInt32Fixed reads 4 bytes for an int32 value, handling the peek buffer correctly.
+func (d *Decoder) readInt32Fixed() ([4]byte, error) {
+	var buf [4]byte
+	// Case 1: Peek buffer has data
+	if d.hasPeek {
+		buf[0] = d.peekedByte
+		d.hasPeek = false
+		// Read remaining 3 bytes directly from stream
+		if _, err := io.ReadFull(d.r, buf[1:4]); err != nil {
+			return buf, err
+		}
+		return buf, nil
+	}
+
+	// Case 2: Standard read via readFull helper
+	data, err := d.readFull(4)
+	if err != nil {
+		return buf, err
+	}
+	copy(buf[:], data)
 	return buf, nil
 }
 
@@ -149,34 +202,75 @@ func (d *Decoder) readInt16() (int16, error) {
 }
 
 func (d *Decoder) readInt32() (int32, error) {
-	_, err := io.ReadFull(d.r, d.buf[:4])
-	if err != nil {
-		return 0, err
+	// Handle peeked byte first
+	if d.hasPeek {
+		d.buf[0] = d.peekedByte
+		d.hasPeek = false
+		_, err := io.ReadFull(d.r, d.buf[1:4])
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		_, err := io.ReadFull(d.r, d.buf[:4])
+		if err != nil {
+			return 0, err
+		}
 	}
 	return int32(binary.BigEndian.Uint32(d.buf[:4])), nil
 }
 
 func (d *Decoder) readInt64() (int64, error) {
-	_, err := io.ReadFull(d.r, d.buf[:8])
-	if err != nil {
-		return 0, err
+	// Handle peeked byte first
+	if d.hasPeek {
+		d.buf[0] = d.peekedByte
+		d.hasPeek = false
+		_, err := io.ReadFull(d.r, d.buf[1:8])
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		_, err := io.ReadFull(d.r, d.buf[:8])
+		if err != nil {
+			return 0, err
+		}
 	}
-	return int64(binary.BigEndian.Uint64(d.buf[:8])), nil
+	result := int64(binary.BigEndian.Uint64(d.buf[:8]))
+	return result, nil
 }
 
 func (d *Decoder) readFloat32() (float32, error) {
-	_, err := io.ReadFull(d.r, d.buf[:4])
-	if err != nil {
-		return 0, err
+	// Handle peeked byte first
+	if d.hasPeek {
+		d.buf[0] = d.peekedByte
+		d.hasPeek = false
+		_, err := io.ReadFull(d.r, d.buf[1:4])
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		_, err := io.ReadFull(d.r, d.buf[:4])
+		if err != nil {
+			return 0, err
+		}
 	}
 	bits := binary.BigEndian.Uint32(d.buf[:4])
 	return math.Float32frombits(bits), nil
 }
 
 func (d *Decoder) readFloat64() (float64, error) {
-	_, err := io.ReadFull(d.r, d.buf[:8])
-	if err != nil {
-		return 0, err
+	// Handle peeked byte first
+	if d.hasPeek {
+		d.buf[0] = d.peekedByte
+		d.hasPeek = false
+		_, err := io.ReadFull(d.r, d.buf[1:8])
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		_, err := io.ReadFull(d.r, d.buf[:8])
+		if err != nil {
+			return 0, err
+		}
 	}
 	bits := binary.BigEndian.Uint64(d.buf[:8])
 	return math.Float64frombits(bits), nil
@@ -205,6 +299,28 @@ func (d *Decoder) readCount() (int64, error) {
 		return d.readInt64()
 	}
 	return 0, fmt.Errorf("ubjson: invalid count marker %q", marker)
+}
+
+// readCountWithMarker reads an integer value for a given marker byte.
+// Unlike readCount, the marker byte is already consumed and passed as parameter.
+func (d *Decoder) readCountWithMarker(marker byte) (int64, error) {
+	switch marker {
+	case markerInt8:
+		v, err := d.readInt8()
+		return int64(v), err
+	case markerUint8:
+		v, err := d.readUint8()
+		return int64(v), err
+	case markerInt16:
+		v, err := d.readInt16()
+		return int64(v), err
+	case markerInt32:
+		v, err := d.readInt32()
+		return int64(v), err
+	case markerInt64:
+		return d.readInt64()
+	}
+	return 0, fmt.Errorf("ubjson: invalid int marker %q (0x%02x)", marker, marker)
 }
 
 // readString reads a length-prefixed string.
@@ -400,6 +516,63 @@ func (d *Decoder) readValue(marker byte) (Token, error) {
 		}
 		return Token{Kind: TokInt16, I16Val: v}, nil
 	case markerInt32:
+		// In XGBoost format, 'l' is ambiguous - it can be:
+		// 1. An int32 value (l <4-byte value>)
+		// 2. A string length prefix (l <4-byte length> <bytes>)
+		// We disambiguate by peeking at the next byte after the 4 length/value bytes.
+		// If it's '$' or another type marker, it's int32. Otherwise, check if the
+		// bytes form a plausible string length by looking at what follows.
+		if d.xgbMode && !d.expectKey {
+			// Read the 4 bytes that follow 'l' using the helper that handles peek buffer
+			fourBytes, err := d.readInt32Fixed()
+			if err != nil {
+				return Token{}, err
+			}
+			// Peek at the next byte to determine if this is a String length
+			peek, peekErr := d.peekByte()
+			fmt.Printf("DEBUG markerInt32: fourBytes=%v, peek=0x%02x(%q), peekErr=%v\n", fourBytes, peek, string(peek), peekErr)
+			if peekErr == nil {
+				// If the next byte is a known marker (not data), treat as int32
+				if peek == markerTypeMarker || peek == markerObjectStart ||
+					peek == markerObjectEnd || peek == markerArrayStart ||
+					peek == markerArrayEnd {
+					// This is an int32 value
+					fmt.Printf("DEBUG markerInt32: returning TokInt32(val=%d)\n", int32(binary.BigEndian.Uint32(fourBytes[:])))
+					return Token{Kind: TokInt32, I32Val: int32(binary.BigEndian.Uint32(fourBytes[:]))}, nil
+				}
+				// Otherwise, check if the bytes form a valid string length
+				// by seeing if we can read that many bytes as valid data
+				length := int(binary.BigEndian.Uint32(fourBytes[:]))
+				if length > 0 && length < 10000 {
+					// Try to peek more bytes to validate
+					// For now, just check if the first byte looks like text
+					if (peek >= 'a' && peek <= 'z') || (peek >= 'A' && peek <= 'Z') ||
+						(peek >= '0' && peek <= '9') || peek == '_' || peek == '.' {
+						// Looks like string data - this is a string length
+						// Read the rest of the string (length-1 bytes after the peeked one)
+						rest := length - 1
+						var buf []byte
+						if rest > 0 {
+							restBuf, err := d.readFull(rest)
+							if err != nil {
+								return Token{}, err
+							}
+							buf = append([]byte{peek}, restBuf...)
+						} else {
+							buf = []byte{peek}
+						}
+						d.hasPeek = false // consumed the peek
+						return Token{Kind: TokString, StrVal: string(buf)}, nil
+					}
+				}
+				// Fallback: treat as int32
+				fmt.Printf("DEBUG markerInt32: fallback - peek=0x%02x not a marker, not text\n", peek)
+				d.peekedByte = peek
+				d.hasPeek = true
+			}
+			fmt.Printf("DEBUG markerInt32: returning TokInt32(val=%d), peekErr=%v\n", int32(binary.BigEndian.Uint32(fourBytes[:])), peekErr)
+			return Token{Kind: TokInt32, I32Val: int32(binary.BigEndian.Uint32(fourBytes[:]))}, nil
+		}
 		v, err := d.readInt32()
 		if err != nil {
 			return Token{}, err
@@ -464,10 +637,12 @@ func (d *Decoder) readValue(marker byte) (Token, error) {
 // It also tracks object nesting context and returns TokKey for strings inside objects.
 // Returns io.EOF when the stream is exhausted.
 func (d *Decoder) Next() (Token, error) {
+	fmt.Printf("DEBUG Next: CALLED, hasPeek=%v, peekedByte=0x%02x\n", d.hasPeek, d.peekedByte)
 	marker, err := d.readByte()
 	if err != nil {
 		return Token{}, err
 	}
+	fmt.Printf("DEBUG Next: marker=0x%02x ('%c'), xgbMode=%v, expectKey=%v, hasPeek=%v\n", marker, marker, d.xgbMode, d.expectKey, d.hasPeek)
 
 	// Check for optimized type/count container: [$]
 	if marker == markerTypeMarker {
@@ -480,19 +655,156 @@ func (d *Decoder) Next() (Token, error) {
 		return tok, nil
 	}
 
+	// In XGBoost mode, when expecting a key, the marker could be:
+	// 1. 'l' - string length prefix or typed array '$l' (peeking ahead)
+	// 2. '$' - start of typed array (unoptimized form)
+	// 3. Other markers for string/int/float values
+	// Check for typed arrays that start with type markers before
+	// treating them as XGBoost string length prefixes.
+	if d.xgbMode && d.expectKey {
+		// Peek ahead to check for typed array: '$' followed by type marker
+		if marker == markerTypeMarker || marker == markerInt32 || marker == markerFloat32 {
+			// Peek at the next byte to determine if this is a typed array
+			peek, peekErr := d.peekByte()
+			if peekErr == nil && peek == markerTypeMarker {
+				// This is a typed array in the form: $ <type> # <count>
+				// Read the '$' that we already consumed, then read the array
+				tok, err := d.readTypedArray()
+				if err != nil {
+					return tok, err
+				}
+				d.expectKey = d.objDepth > 0
+				return tok, nil
+			}
+		}
+	}
+
+	// XGBoost mode: when expecting a key, the marker is a type indicator
+	// for a raw length prefix (l <4 bytes>, i <1 byte>, etc.)
+	// NOTE: When NOT expecting a key (i.e., reading a value), we fall through
+	// to readValue which handles 'l' via readString() for string values.
+	if d.xgbMode && d.expectKey {
+		if marker == markerObjectEnd {
+			// Object end: handle directly since XGBoost branch bypasses readValue
+			tok, err := d.readValue(marker)
+			if err != nil {
+				return tok, err
+			}
+			d.objDepth--
+			// Pop xgb stack and restore mode for enclosing object
+			if len(d.xgbStack) > 0 {
+				poppedMode := d.xgbStack[len(d.xgbStack)-1]
+				d.xgbStack = d.xgbStack[:len(d.xgbStack)-1]
+				d.xgbMode = poppedMode
+			}
+			// After exiting object: expect a key only if inside an object (not an array)
+			// When arrayDepth > 0, we're inside an array and should NOT expect keys
+			fmt.Printf("DEBUG ObjectEnd: objDepth=%d, arrayDepth=%d\n", d.objDepth, d.arrayDepth)
+			if d.arrayDepth > 0 {
+				d.expectKey = false
+				fmt.Println("DEBUG ObjectEnd: setting expectKey=false (inside array)")
+			} else if d.objDepth > 0 {
+				d.expectKey = true
+				fmt.Println("DEBUG ObjectEnd: setting expectKey=true (inside object)")
+			} else {
+				d.expectKey = false
+				fmt.Println("DEBUG ObjectEnd: setting expectKey=false (at root)")
+			}
+			return tok, nil
+		}
+		if marker == markerArrayEnd {
+			// Array end: handle directly since XGBoost branch bypasses readValue
+			fmt.Printf("DEBUG ArrayEnd (xgb): marker=0x%02x, objDepth=%d, arrayDepth=%d\n", marker, d.objDepth, d.arrayDepth)
+			tok, err := d.readValue(marker)
+			if err != nil {
+				return tok, err
+			}
+			d.arrayDepth--
+			// Pop xgb stack (matching the push in TokArrayStart)
+			if len(d.xgbStack) > 0 {
+				d.xgbStack = d.xgbStack[:len(d.xgbStack)-1]
+			}
+			// After exiting array, if we're in an object context, expect a key next
+			if d.objDepth > 0 && d.arrayDepth == 0 {
+				d.expectKey = true
+			} else {
+				d.expectKey = false
+			}
+			fmt.Printf("DEBUG ArrayEnd (xgb): after handling, expectKey=%v\n", d.expectKey)
+			return tok, nil
+		}
+		length, readErr := d.readCountWithMarker(marker)
+		if readErr != nil {
+			return Token{}, fmt.Errorf("reading XGBoost key length (marker=0x%02x): %w", marker, readErr)
+		}
+		buf, readErr := d.readFull(int(length))
+		if readErr != nil {
+			return Token{}, fmt.Errorf("reading XGBoost key bytes (length=%d): %w", length, readErr)
+		}
+		d.expectKey = false
+		return Token{Kind: TokKey, StrVal: string(buf)}, nil
+	}
+
 	tok, err := d.readValue(marker)
 	if err != nil {
 		return tok, err
 	}
+	fmt.Printf("DEBUG Next: after readValue, tok.Kind=%d, hasPeek=%v, peekedByte=0x%02x\n", tok.Kind, d.hasPeek, d.peekedByte)
 
 	// Track object nesting
 	switch tok.Kind {
 	case TokObjectStart:
 		d.objDepth++
 		d.expectKey = true
+		// XGBoost UBJSON format detection: {L <8-byte count>
+		// XGBoost writes object counts as raw int64 without '#' marker.
+		// Keys/values are <int-marker><length><bytes> without 'S' marker.
+		// XGBoost format can appear at any nesting level - detect it when we see it.
+		next, peekErr := d.peekByte()
+		if peekErr == nil && next == markerInt64 {
+			d.readByte() // consume the 'L'
+			if _, readErr := d.readInt64(); readErr != nil {
+				return Token{}, fmt.Errorf("reading XGBoost object count: %w", readErr)
+			}
+			// Detected XGBoost format
+			// Push current mode to stack, then set mode to true
+			fmt.Printf("DEBUG ObjectStart(XGB): push xgbMode=%v, set xgbMode=true, stack was %v\n", d.xgbMode, d.xgbStack)
+			d.xgbStack = append(d.xgbStack, d.xgbMode)
+			d.xgbMode = true
+			d.expectKey = true
+		} else {
+			// Standard object: push current xgbMode to stack, set to false
+			// When we exit this object, xgbMode will be restored from stack
+			fmt.Printf("DEBUG ObjectStart(std): push xgbMode=%v, set xgbMode=false, stack was %v\n", d.xgbMode, d.xgbStack)
+			d.xgbStack = append(d.xgbStack, d.xgbMode)
+			d.xgbMode = false
+		}
 	case TokObjectEnd:
+		fmt.Printf("DEBUG ObjectEnd: objDepth=%d, xgbMode=%v, stack=%v\n", d.objDepth, d.xgbMode, d.xgbStack)
 		d.objDepth--
 		d.expectKey = d.objDepth > 0
+		// Pop xgb stack and restore mode for the enclosing object
+		if len(d.xgbStack) > 0 {
+			poppedMode := d.xgbStack[len(d.xgbStack)-1]
+			d.xgbStack = d.xgbStack[:len(d.xgbStack)-1]
+			fmt.Printf("DEBUG ObjectEnd: pop %v, restore xgbMode to %v, stack now %v\n", poppedMode, poppedMode, d.xgbStack)
+			d.xgbMode = poppedMode
+		} else {
+			fmt.Printf("DEBUG ObjectEnd: stack empty!\n")
+		}
+	case TokArrayStart:
+		d.arrayDepth++
+		d.xgbStack = append(d.xgbStack, false) // arrays are never XGBoost
+	case TokArrayEnd:
+		d.arrayDepth--
+		// Pop xgb stack (matching the push in TokArrayStart)
+		if len(d.xgbStack) > 0 {
+			d.xgbStack = d.xgbStack[:len(d.xgbStack)-1]
+		}
+		// After exiting an array, if we're in an object context, expect a key next
+		if d.objDepth > 0 && d.arrayDepth == 0 {
+			d.expectKey = true
+		}
 	case TokString:
 		if d.expectKey {
 			tok.Kind = TokKey
@@ -502,7 +814,9 @@ func (d *Decoder) Next() (Token, error) {
 			d.expectKey = d.objDepth > 0
 		}
 	default:
-		// After any non-container value in an object, expect a key next
+		// After any non-container value in an object, expect a key next.
+		// Note: typed arrays ($l, $d, etc.) bypass readValue via readTypedArray and
+		// don't use arrayDepth, so we must always set expectKey inside objects.
 		if d.objDepth > 0 {
 			d.expectKey = true
 		}
@@ -523,6 +837,26 @@ func (d *Decoder) SkipValue() error {
 		return d.skipObject()
 	case TokArrayStart:
 		return d.skipArray()
+	}
+	// XGBoost mode: int tokens are string length prefixes, skip the bytes
+	if d.xgbMode {
+		var length int64
+		switch tok.Kind {
+		case TokInt8:
+			length = int64(tok.I8Val)
+		case TokUint8:
+			length = int64(tok.U8Val)
+		case TokInt16:
+			length = int64(tok.I16Val)
+		case TokInt32:
+			length = int64(tok.I32Val)
+		case TokInt64:
+			length = tok.I64Val
+		default:
+			return nil // non-int primitives need no extra skipping
+		}
+		_, err := d.readFull(int(length))
+		return err
 	}
 	// Primitive tokens need no additional skipping.
 	return nil
@@ -702,15 +1036,49 @@ func (d *Decoder) ReadFloat64() (float64, error) {
 }
 
 // ReadString reads the next token as a string value.
+// In XGBoost mode, integer tokens represent string length prefixes —
+// the method reads that many raw bytes from the stream.
 func (d *Decoder) ReadString() (string, error) {
 	tok, err := d.Next()
 	if err != nil {
 		return "", err
 	}
-	if tok.Kind != TokString {
-		return "", fmt.Errorf("ubjson: expected string, got %v", tok.Kind)
+	switch tok.Kind {
+	case TokString:
+		return tok.StrVal, nil
+	// XGBoost mode: int tokens after keys represent string length prefixes
+	case TokInt32:
+		buf, err := d.readFull(int(tok.I32Val))
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	case TokInt8:
+		buf, err := d.readFull(int(tok.I8Val))
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	case TokUint8:
+		buf, err := d.readFull(int(tok.U8Val))
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	case TokInt16:
+		buf, err := d.readFull(int(tok.I16Val))
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	case TokInt64:
+		buf, err := d.readFull(int(tok.I64Val))
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
 	}
-	return tok.StrVal, nil
+	return "", fmt.Errorf("ubjson: expected string, got %v", tok.Kind)
 }
 
 // ReadInt32Slice reads an optimized int32 array token.
@@ -747,4 +1115,11 @@ func (d *Decoder) ReadFloat32Slice() ([]float32, error) {
 		return tok.F32Slice, nil
 	}
 	return nil, fmt.Errorf("ubjson: expected float32 array, got %v", tok.Kind)
+}
+
+// ReadBytes reads exactly n raw bytes from the stream.
+// This is useful for reading XGBoost string values where the length
+// was already obtained from a Next() call returning TokInt32.
+func (d *Decoder) ReadBytes(n int) ([]byte, error) {
+	return d.readFull(n)
 }

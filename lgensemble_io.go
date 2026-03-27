@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dmitryikh/leaves/transformation"
-	"github.com/dmitryikh/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 )
 
 type lgEnsembleJSON struct {

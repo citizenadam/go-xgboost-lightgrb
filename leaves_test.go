@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmitryikh/leaves/mat"
-	"github.com/dmitryikh/leaves/transformation"
-	"github.com/dmitryikh/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/mat"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
 )
 
 func isFileExists(filename string) bool {

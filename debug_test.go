@@ -3,7 +3,7 @@ package leaves
 import (
 	"bytes"
 	"fmt"
-	"github.com/dmitryikh/leaves/internal/ubjson"
+	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/ubjson"
 	"testing"
 )
 
