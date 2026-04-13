@@ -19,6 +19,7 @@ _leaves_ is a library implementing prediction code for GBRT (Gradient Boosting R
     * support parallel predictions for batches
     * support sigmoid, softmax transformation functions
     * support getting leaf indices of decision trees
+    * support calibrated predictions via CalibratedClassifierCV (sigmoid method with ensemble averaging)
   * Support LightGBM ([repo](https://github.com/Microsoft/LightGBM)) models:
     * read models from `text` format and from `JSON` format
     * support `gbdt`, `rf` (random forest) and `dart` models
@@ -26,13 +27,17 @@ _leaves_ is a library implementing prediction code for GBRT (Gradient Boosting R
     * addition optimizations for categorical features (for example, _one hot_ decision rule)
     * addition optimizations exploiting only prediction usage
   * Support XGBoost ([repo](https://github.com/dmlc/xgboost)) models:
-    * read models from binary format
+    * read models from binary format and JSON format
     * support `gbtree`, `gblinear`, `dart` models
     * support multiclass predictions
     * support missing values (`nan`)
-  * Support scikit-learn ([repo](https://github.com/scikit-learn/scikit-learn)) tree models (experimental support):
-    * read models from pickle format (protocol `0`)
+  * Support scikit-learn ([repo](https://github.com/scikit-learn/scikit-learn)) tree models:
+    * read models from pickle format (protocol `0-5`)
     * support `sklearn.ensemble.GradientBoostingClassifier`
+    * support `sklearn.calibration.CalibratedClassifierCV` with:
+      - base estimators: `GradientBoostingClassifier`, `XGBClassifier`, `LGBMClassifier`
+      - calibration method: `sigmoid` (Platt scaling)
+      - ensemble averaging across cv folds for probabilistic outputs
 
 
 ## Usage examples
@@ -116,14 +121,17 @@ Single thread:
 ## Limitations
 
   * LightGBM models:
-    * limited support of transformation functions (support only sigmoid, softmax)
+    * transformation functions limited to sigmoid and softmax
   * XGBoost models:
-    * limited support of transformation functions (support only sigmoid, softmax)
-    * could be slight divergence between C API predictions vs. _leaves_ because of floating point convertions and comparisons tolerances
+    * transformation functions limited to sigmoid and softmax
+    * minor divergence possible vs C API predictions due to floating point conversions and comparison tolerances
   * scikit-learn tree models:
-    * no support transformations functions. Output scores is _raw scores_ (as from `GradientBoostingClassifier.decision_function`)
-    * only pickle protocol `0` is supported
-    * could be slight divergence between sklearn predictions vs. _leaves_ because of floating point convertions and comparisons tolerances
+    * calibrated predictions via CalibratedClassifierCV:
+      - only `method='sigmoid'` (Platt scaling) is supported
+      - `method='isotonic'` is not supported
+      - base estimator must be pickled with sklearn API (XGBClassifier, LGBMClassifier, GradientBoostingClassifier)
+      - raw model must contain valid `_learner` (XGBoost) or `handle` (LightGBM) attributes
+    * minor divergence possible vs sklearn predictions due to floating point conversions and comparison tolerances
 
 ## Contacts
 
