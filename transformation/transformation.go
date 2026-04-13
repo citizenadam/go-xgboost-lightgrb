@@ -24,8 +24,11 @@ const (
 	// Exponential is a TransformType that apply exponential function in order to obtain
 	// positive predictions
 	Exponential TransformType = 4
+	// CalibratedSigmoid is a TransformType that applies ensemble-averaged sigmoid calibration
+	// (used by CalibratedClassifierCV with method='sigmoid')
+	CalibratedSigmoid TransformType = 5
 
-	Last TransformType = 4
+	Last TransformType = 5
 )
 
 func (t TransformType) Name() string {
@@ -35,6 +38,7 @@ func (t TransformType) Name() string {
 		"softmax",
 		"leaf_index",
 		"exponential",
+		"calibrated_sigmoid",
 	}
 	if t < Raw || t > Last {
 		return "unknown"

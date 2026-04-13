@@ -115,12 +115,22 @@ func lgTreeFromSklearnDecisionTreeRegressor(tree pickle.SklearnDecisionTreeRegre
 
 // SKEnsembleFromReader reads sklearn tree ensemble model from `reader`
 func SKEnsembleFromReader(reader *bufio.Reader, loadTransformation bool) (*Ensemble, error) {
-	e := &lgEnsemble{name: "sklearn.ensemble.GradientBoostingClassifier"}
 	decoder := pickle.NewDecoder(reader)
 	res, err := decoder.Decode()
 	if err != nil {
 		return nil, fmt.Errorf("error while decoding: %w", err)
 	}
+
+	// Try to parse as CalibratedClassifierCV first
+	calibrated := &pickle.SklearnCalibratedClassifierCV{}
+	if err := pickle.ParseClass(calibrated, res); err == nil {
+		// Successfully parsed as CalibratedClassifierCV
+		// ParseClass has populated the calibrated object, including Calibrators
+		return parseCalibratedClassifierCV(calibrated, calibrated.Calibrators)
+	}
+
+	// Fall back to GradientBoostingClassifier (existing behavior)
+	e := &lgEnsemble{name: "sklearn.ensemble.GradientBoostingClassifier"}
 	gbdt := pickle.SklearnGradientBoosting{}
 	err = pickle.ParseClass(&gbdt, res)
 	if err != nil {
@@ -198,4 +208,149 @@ func SKEnsembleFromPickleFile(filename string, loadTransformation bool) (*Ensemb
 // This is an alias for SKEnsembleFromReader for API clarity
 func SKEnsembleFromPickleReader(reader *bufio.Reader, loadTransformation bool) (*Ensemble, error) {
 	return SKEnsembleFromReader(reader, loadTransformation)
+}
+
+// parseCalibratedClassifierCV parses a CalibratedClassifierCV wrapper
+// and returns an Ensemble with the appropriate calibration transformation
+func parseCalibratedClassifierCV(calibrated *pickle.SklearnCalibratedClassifierCV, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
+	if calibrated.Method != "sigmoid" {
+		return nil, fmt.Errorf("unsupported calibration method: %s (only 'sigmoid' is supported)", calibrated.Method)
+	}
+
+	// Get the base estimator from the pickle object
+	// The base estimator should be a Reduce or Build containing the actual model
+	baseEstimator := calibrated.BaseEstimator
+
+	// Try to parse as GradientBoostingClassifier
+	gbdt := &pickle.SklearnGradientBoosting{}
+	if err := pickle.ParseClass(gbdt, baseEstimator); err == nil {
+		return parseGradientBoostingFromCalibrated(gbdt, calibrators)
+	}
+
+	// Try to parse as XGBClassifier (xgboost.XGBClassifier)
+	xgbModel, err := pickle.ParseXGBClassifier(baseEstimator)
+	if err == nil {
+		return parseXGBClassifierFromCalibrated(xgbModel, calibrators)
+	}
+
+	// Try to parse as LGBMClassifier (lightgbm.LGBMClassifier)
+	lgbmModel, err := pickle.ParseLGBMClassifier(baseEstimator)
+	if err == nil {
+		return parseLGBMClassifierFromCalibrated(lgbmModel, calibrators)
+	}
+
+	// If we can't identify the base estimator type, return an error with helpful message
+	return nil, fmt.Errorf("unsupported base estimator type in CalibratedClassifierCV: %T (supported: GradientBoostingClassifier, XGBClassifier, LGBMClassifier)", baseEstimator)
+}
+
+// parseXGBClassifierFromCalibrated parses an XGBClassifier from inside a CalibratedClassifierCV
+func parseXGBClassifierFromCalibrated(xgbModel *pickle.SklearnXGBClassifier, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
+	// The booster_ contains the actual xgboost Booster model
+	// It could be in various formats:
+	// 1. A pickled xgboost.Booster object (native XGBoost format)
+	// 2. A pickled Booster in sklearn-compatible format
+
+	// For now, try to parse the booster as an XGBoost model
+	// We'll need to handle the case where booster_ is a pickled Booster object
+
+	// TODO: Implement proper XGBClassifier booster parsing
+	// The booster_ attribute needs to be decoded and converted to Ensemble
+
+	// For now, return an error indicating this needs implementation
+	return nil, fmt.Errorf("XGBClassifier booster parsing not yet implemented - the booster object needs to be decoded")
+}
+
+// parseLGBMClassifierFromCalibrated parses an LGBMClassifier from inside a CalibratedClassifierCV
+func parseLGBMClassifierFromCalibrated(lgbmModel *pickle.SklearnLGBMClassifier, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
+	// The booster_ contains the actual lightgbm Booster model
+
+	// TODO: Implement proper LGBMClassifier booster parsing
+	// The booster_ attribute needs to be decoded and converted to Ensemble
+
+	return nil, fmt.Errorf("LGBMClassifier booster parsing not yet implemented - the booster object needs to be decoded")
+}
+
+// parseGradientBoostingFromCalibrated parses a GradientBoostingClassifier from inside a CalibratedClassifierCV
+func parseGradientBoostingFromCalibrated(gbdt *pickle.SklearnGradientBoosting, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
+	e := &lgEnsemble{name: "sklearn.ensemble.GradientBoostingClassifier (calibrated)"}
+
+	e.nRawOutputGroups = gbdt.NClasses
+	if e.nRawOutputGroups == 2 {
+		e.nRawOutputGroups = 1
+	}
+
+	e.MaxFeatureIdx = gbdt.MaxFeatures - 1
+
+	nTrees := gbdt.NEstimators
+	if nTrees == 0 {
+		return nil, fmt.Errorf("no trees in file")
+	}
+
+	if gbdt.NEstimators*e.nRawOutputGroups != len(gbdt.Estimators) {
+		return nil, fmt.Errorf("unexpected number of trees (NEstimators = %d, nRawOutputGroups = %d, len(Estimatoers) = %d", gbdt.NEstimators, e.nRawOutputGroups, len(gbdt.Estimators))
+	}
+
+	scale := gbdt.LearningRate
+	base := make([]float64, e.nRawOutputGroups)
+	if gbdt.InitEstimator.Name == "LogOddsEstimator" {
+		for i := 0; i < e.nRawOutputGroups; i++ {
+			base[i] = gbdt.InitEstimator.Prior[0]
+		}
+	} else if gbdt.InitEstimator.Name == "PriorProbabilityEstimator" {
+		if len(gbdt.InitEstimator.Prior) != len(base) {
+			return nil, fmt.Errorf("len(gbdt.InitEstimator.Prior) != len(base)")
+		}
+		base = gbdt.InitEstimator.Prior
+	} else {
+		return nil, fmt.Errorf("unknown initial estimator \"%s\"", gbdt.InitEstimator.Name)
+	}
+
+	e.Trees = make([]lgTree, 0, gbdt.NEstimators*gbdt.NClasses)
+	for i := 0; i < gbdt.NEstimators; i++ {
+		for j := 0; j < e.nRawOutputGroups; j++ {
+			treeNum := i*e.nRawOutputGroups + j
+			tree, err := lgTreeFromSklearnDecisionTreeRegressor(gbdt.Estimators[treeNum], scale, base[j])
+			if err != nil {
+				return nil, fmt.Errorf("error while creating %d tree: %w", treeNum, err)
+			}
+			e.Trees = append(e.Trees, tree)
+		}
+		for k := range base {
+			base[k] = 0.0
+		}
+	}
+
+	// Build calibration transformation with ensemble averaging
+	calTransform := buildCalibratedTransform(calibrators, e.nRawOutputGroups)
+	return &Ensemble{e, calTransform}, nil
+}
+
+// buildCalibratedTransform creates a calibrated sigmoid transformation from calibrator parameters
+func buildCalibratedTransform(calibrators []pickle.SklearnLogisticRegression, nOutputGroups int) transformation.Transform {
+	calParams := make([]transformation.CalibratorParams, len(calibrators))
+	for i, cal := range calibrators {
+		// For binary classification, coef_ is [1, 1] and intercept_ is [1]
+		// For multiclass, coef_ is [n_classes, n_classes-1] (one-vs-rest)
+		// We take the first row for binary (the coefficient for the positive class)
+		coef := make([]float64, nOutputGroups)
+		if len(cal.Coefficients) > 0 && len(cal.Coefficients[0]) > 0 {
+			// Take first coefficient for binary, or map appropriately for multiclass
+			if nOutputGroups == 1 && len(cal.Coefficients) >= 1 {
+				coef[0] = cal.Coefficients[0][0]
+			}
+		}
+		var intercept float64
+		if len(cal.Intercepts) > 0 {
+			intercept = cal.Intercepts[0]
+		}
+		calParams[i] = transformation.CalibratorParams{
+			Coefficients: coef,
+			Intercept:    intercept,
+		}
+	}
+
+	return &transformation.TransformCalibratedSigmoid{
+		NumOutputGroups: nOutputGroups,
+		Calibrators:     calParams,
+	}
 }

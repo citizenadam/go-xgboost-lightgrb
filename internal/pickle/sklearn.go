@@ -695,3 +695,269 @@ func (e *SKlearnInitEstimator) Build(build Build) (err error) {
 	}
 	return
 }
+
+// SklearnLogisticRegression represents sklearn.linear_model.LogisticRegression
+// Used as calibrator in CalibratedClassifierCV
+type SklearnLogisticRegression struct {
+	Coefficients [][]float64 // shape [n_classes, n_features] or [1, 1] for binary
+	Intercepts   []float64   // shape [n_classes]
+}
+
+// Reduce implements PythonClass interface
+func (t *SklearnLogisticRegression) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "sklearn.linear_model._logistic", "LogisticRegression")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Build implements PythonClass interface
+func (t *SklearnLogisticRegression) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
+	}
+
+	// Extract coef_ (coefficients)
+	coefObj, err := dict.value("coef_")
+	if err != nil {
+		return fmt.Errorf("failed to get coef_: %w", err)
+	}
+	coefArray := NumpyArrayRaw{}
+	if err := ParseClass(&coefArray, coefObj); err != nil {
+		return fmt.Errorf("failed to parse coef_: %w", err)
+	}
+
+	// coef_ shape is [n_classes, n_features] or [1, 1] for binary
+	if len(coefArray.Shape) != 2 {
+		return fmt.Errorf("expected coef_ shape to be 2D, got %v", coefArray.Shape)
+	}
+
+	// Extract coefficients row by row
+	t.Coefficients = make([][]float64, 0, coefArray.Shape[0])
+	rowSize := coefArray.Shape[1]
+
+	err = coefArray.Data.Iterate(8, func(b []byte) error {
+		row := make([]float64, rowSize)
+		for i := 0; i < rowSize; i++ {
+			row[i] = util.Float64FromBytes(b[i*8:(i+1)*8], coefArray.Type.LittleEndinan)
+		}
+		t.Coefficients = append(t.Coefficients, row)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to iterate coef_ data: %w", err)
+	}
+
+	// Extract intercept_ (bias)
+	interceptObj, err := dict.value("intercept_")
+	if err != nil {
+		return fmt.Errorf("failed to get intercept_: %w", err)
+	}
+	interceptArray := NumpyArrayRaw{}
+	if err := ParseClass(&interceptArray, interceptObj); err != nil {
+		return fmt.Errorf("failed to parse intercept_: %w", err)
+	}
+
+	// intercept_ shape is [n_classes] for multiclass or [1] for binary
+	if len(interceptArray.Shape) != 1 {
+		return fmt.Errorf("expected intercept_ shape to be 1D, got %v", interceptArray.Shape)
+	}
+
+	t.Intercepts = make([]float64, interceptArray.Shape[0])
+	err = interceptArray.Data.Iterate(8, func(b []byte) error {
+		t.Intercepts = append(t.Intercepts, util.Float64FromBytes(b, interceptArray.Type.LittleEndinan))
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to iterate intercept_ data: %w", err)
+	}
+
+	return nil
+}
+
+// SklearnCalibratedClassifierCV represents sklearn.calibration.CalibratedClassifierCV
+type SklearnCalibratedClassifierCV struct {
+	BaseEstimator any                         // The wrapped classifier (XGBClassifier, LGBMClassifier, etc.)
+	Method        string                      // 'sigmoid' or 'isotonic'
+	Calibrators   []SklearnLogisticRegression // Fitted calibrators (one per fold)
+	NClasses      int
+}
+
+// Reduce implements PythonClass interface
+func (t *SklearnCalibratedClassifierCV) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "sklearn.calibration", "CalibratedClassifierCV")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Build implements PythonClass interface
+func (t *SklearnCalibratedClassifierCV) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
+	}
+
+	// Get method ('sigmoid' or 'isotonic')
+	methodObj, err := dict.value("method")
+	if err != nil {
+		return fmt.Errorf("failed to get method: %w", err)
+	}
+	methodUnicode, err := toUnicode(methodObj, -1)
+	if err != nil {
+		return fmt.Errorf("failed to parse method: %w", err)
+	}
+	t.Method = string(methodUnicode)
+
+	// Get base_estimator_ (the wrapped classifier)
+	baseEstimatorObj, err := dict.value("base_estimator_")
+	if err != nil {
+		return fmt.Errorf("failed to get base_estimator_: %w", err)
+	}
+	t.BaseEstimator = baseEstimatorObj
+
+	// Get calibrators_ (list of fitted calibrators)
+	calibratorsObj, err := dict.value("calibrators_")
+	if err != nil {
+		return fmt.Errorf("failed to get calibrators_: %w", err)
+	}
+
+	// calibrators_ is a list of LogisticRegression objects (one per cv fold)
+	calibratorsList, err := toList(calibratorsObj, -1)
+	if err != nil {
+		return fmt.Errorf("failed to parse calibrators_ as list: %w", err)
+	}
+
+	t.Calibrators = make([]SklearnLogisticRegression, 0, len(calibratorsList))
+	for i, calObj := range calibratorsList {
+		cal := SklearnLogisticRegression{}
+		if err := ParseClass(&cal, calObj); err != nil {
+			return fmt.Errorf("failed to parse calibrator %d: %w", i, err)
+		}
+		t.Calibrators = append(t.Calibrators, cal)
+	}
+
+	// Get n_classes_
+	nClassesObj, err := dict.value("n_classes_")
+	if err != nil {
+		return fmt.Errorf("failed to get n_classes_: %w", err)
+	}
+	nClassesRaw := NumpyScalarRaw{}
+	if err := ParseClass(&nClassesRaw, nClassesObj); err != nil {
+		return fmt.Errorf("failed to parse n_classes_: %w", err)
+	}
+	if nClassesRaw.Type.Type != "i8" {
+		return fmt.Errorf("expected i8 for n_classes_, got %v", nClassesRaw.Type.Type)
+	}
+	t.NClasses = int(util.Float64FromBytes(nClassesRaw.Data, nClassesRaw.Type.LittleEndinan))
+
+	return nil
+}
+
+// SklearnXGBClassifier represents xgboost.XGBClassifier
+type SklearnXGBClassifier struct {
+	BoosterObj any // The underlying xgboost Booster
+}
+
+// Reduce implements PythonClass interface for XGBClassifier
+func (t *SklearnXGBClassifier) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "xgboost", "XGBClassifier")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Build implements PythonClass interface for XGBClassifier
+func (t *SklearnXGBClassifier) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
+	}
+
+	// Get the booster_ attribute which contains the actual xgboost model
+	boosterObj, err := dict.value("booster_")
+	if err != nil {
+		return fmt.Errorf("failed to get booster_: %w", err)
+	}
+	t.BoosterObj = boosterObj
+
+	return nil
+}
+
+// ParseXGBClassifier attempts to parse an XGBClassifier from a pickle object
+// Returns the parsed XGBClassifier or an error if parsing fails
+func ParseXGBClassifier(obj any) (*SklearnXGBClassifier, error) {
+	xgb := &SklearnXGBClassifier{}
+	if err := ParseClass(xgb, obj); err != nil {
+		return nil, err
+	}
+	return xgb, nil
+}
+
+// SklearnLGBMClassifier represents lightgbm.LGBMClassifier
+type SklearnLGBMClassifier struct {
+	BoosterObj any // The underlying lightgbm Booster
+}
+
+// Reduce implements PythonClass interface for LGBMClassifier
+func (t *SklearnLGBMClassifier) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "lightgbm", "LGBMClassifier")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Build implements PythonClass interface for LGBMClassifier
+func (t *SklearnLGBMClassifier) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
+	}
+
+	// Get the booster_ attribute which contains the actual lightgbm model
+	boosterObj, err := dict.value("booster_")
+	if err != nil {
+		return fmt.Errorf("failed to get booster_: %w", err)
+	}
+	t.BoosterObj = boosterObj
+
+	return nil
+}
+
+// ParseLGBMClassifier attempts to parse an LGBMClassifier from a pickle object
+// Returns the parsed LGBMClassifier or an error if parsing fails
+func ParseLGBMClassifier(obj any) (*SklearnLGBMClassifier, error) {
+	lgbm := &SklearnLGBMClassifier{}
+	if err := ParseClass(lgbm, obj); err != nil {
+		return nil, err
+	}
+	return lgbm, nil
+}
+
+// BoosterFromPickle decodes a pickled xgboost.Booster object
+// The booster is typically stored as a nested pickle object within XGBClassifier
+func BoosterFromPickle(obj any) ([]byte, error) {
+	// The booster object could be:
+	// 1. A Reduce/Build containing the pickled Booster data
+	// 2. A direct byte representation
+
+	switch o := obj.(type) {
+	case Build:
+		// The booster is stored as a Build object with the actual booster in Args
+		// We need to re-encode it to bytes for the XGBoost parser
+		_ = o // Build contains the booster data in Args
+		return nil, fmt.Errorf("Booster needs to be extracted from Build - not directly supported")
+	case Reduce:
+		// Try to extract the booster from the Reduce
+		_ = o
+		return nil, fmt.Errorf("Booster needs to be extracted from Reduce - not directly supported")
+	default:
+		// The booster object type is not recognized
+		return nil, fmt.Errorf("unrecognized booster object type: %T", obj)
+	}
+}
