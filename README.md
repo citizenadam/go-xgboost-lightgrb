@@ -133,7 +133,4 @@ Single thread:
       - raw model must contain valid `_learner` (XGBoost) or `handle` (LightGBM) attributes
     * minor divergence possible vs sklearn predictions due to floating point conversions and comparison tolerances
 
-## Contacts
 
-In case if you are interested in the project or if you have questions, please contact with me by
-email: khdmitryi ```at``` gmail.com
