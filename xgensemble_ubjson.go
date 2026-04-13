@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/ubjson"
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/internal/ubjson"
+	"github.com/citizenadam/go-xgboost-lightgrb/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/util"
 )
 
 // ubjsonMarkerString is the UBJSON string type marker ('S').

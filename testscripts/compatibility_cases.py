@@ -4,42 +4,42 @@ from compatibility_core import Case, LibraryType
 
 
 LIGHTGBM_VERSIONS = [
-    '2.3.0',
-    '2.2.3',
-    '2.2.2',
-    '2.2.1',
-    '2.2.0',
-    '2.1.2',
-    '2.1.1',
-    '2.1.0',
-    '2.0.12',
-    '2.0.11',
-    '2.0.10',
+    "2.3.0",
+    "2.2.3",
+    "2.2.2",
+    "2.2.1",
+    "2.2.0",
+    "2.1.2",
+    "2.1.1",
+    "2.1.0",
+    "2.0.12",
+    "2.0.11",
+    "2.0.10",
 ]
 
 XGBOOST_VERSIONS = [
-    '0.90',
-    '0.82',
-    '0.72.1',
+    "0.90",
+    "0.82",
+    "0.72.1",
 ]
 
 
 class BaseCase(Case):
     files = dict(
-        model_filename='model.txt',
-        true_predictions_filename='true_predictions.txt',
-        predictions_filename='predictions.txt',
-        data_filename='data.txt',
+        model_filename="model.txt",
+        true_predictions_filename="true_predictions.txt",
+        predictions_filename="predictions.txt",
+        data_filename="data.txt",
     )
-    python_template=None
-    go_template=None
+    python_template = None
+    go_template = None
 
     def compare(self):
         self.compare_matrices(
-            matrix1_filename=self.files['true_predictions_filename'],
-            matrix2_filename=self.files['predictions_filename'],
+            matrix1_filename=self.files["true_predictions_filename"],
+            matrix2_filename=self.files["predictions_filename"],
             tolerance=1e-10,
-            max_number_of_mismatches_ratio=0.0
+            max_number_of_mismatches_ratio=0.0,
         )
 
     def go_code(self):
@@ -47,6 +47,7 @@ class BaseCase(Case):
 
     def python_code(self):
         return self.python_template.substitute(self.files)
+
 
 class LGBaseCase(BaseCase):
     library = LibraryType.LIGHTGBM
@@ -86,8 +87,8 @@ np.savetxt('$data_filename', X_test, delimiter='\t')
 package main
 
 import (
-    "github.com/dmitryikh/leaves"
-    "github.com/dmitryikh/leaves/mat"
+    "github.com/citizenadam/go-xgboost-lightgrb"
+    "github.com/citizenadam/go-xgboost-lightgrb/mat"
 )
 
 func main() {
@@ -156,8 +157,8 @@ datasets.dump_svmlight_file(X_test, y_test, '$data_filename')
 package main
 
 import (
-    "github.com/dmitryikh/leaves"
-    "github.com/dmitryikh/leaves/mat"
+    "github.com/citizenadam/go-xgboost-lightgrb"
+    "github.com/citizenadam/go-xgboost-lightgrb/mat"
 )
 
 func main() {
@@ -214,8 +215,8 @@ datasets.dump_svmlight_file(X_test, y_test, '$data_filename')
 package main
 
 import (
-    "github.com/dmitryikh/leaves"
-    "github.com/dmitryikh/leaves/mat"
+    "github.com/citizenadam/go-xgboost-lightgrb"
+    "github.com/citizenadam/go-xgboost-lightgrb/mat"
 )
 
 func main() {
@@ -244,10 +245,10 @@ func main() {
 
     def compare(self):
         self.compare_matrices(
-            matrix1_filename=self.files['true_predictions_filename'],
-            matrix2_filename=self.files['predictions_filename'],
+            matrix1_filename=self.files["true_predictions_filename"],
+            matrix2_filename=self.files["predictions_filename"],
             tolerance=1e-6,
-            max_number_of_mismatches_ratio=0.0
+            max_number_of_mismatches_ratio=0.0,
         )
 
 

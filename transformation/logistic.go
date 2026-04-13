@@ -3,7 +3,7 @@ package transformation
 import (
 	"fmt"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/util"
 )
 
 type TransformLogistic struct{}

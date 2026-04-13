@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/util"
 )
 
 // SklearnNode represents tree node data structure
@@ -321,6 +321,311 @@ func (t *SklearnGradientBoosting) Build(build Build) (err error) {
 			return
 		}
 	}
+	return
+}
+
+// SklearnRandomForestClassifier represents sklearn's RandomForestClassifier
+type SklearnRandomForestClassifier struct {
+	NEstimators int
+	MaxFeatures int
+	NClasses    int
+	Classes     []int
+	Estimators  []SklearnDecisionTreeRegressor
+	// For binary classification, n_outputs_ is 1
+	NOutputs int
+}
+
+// Reduce handles the pickle REDUCE opcode for RandomForestClassifier
+func (t *SklearnRandomForestClassifier) Reduce(reduce Reduce) (err error) {
+	_, err = toGlobal(reduce.Callable, "copy_reg", "_reconstructor")
+	if err != nil {
+		return
+	}
+	if len(reduce.Args) != 3 {
+		return fmt.Errorf("not expected tuple: %#v", reduce.Args)
+	}
+	_, err = toGlobal(reduce.Args[0], "sklearn.ensemble.forest", "RandomForestClassifier")
+	if err != nil {
+		return
+	}
+	return
+}
+
+// Build handles the pickle BUILD opcode for RandomForestClassifier
+func (t *SklearnRandomForestClassifier) Build(build Build) (err error) {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return
+	}
+
+	t.NEstimators, err = dict.toInt("n_estimators")
+	if err != nil {
+		return
+	}
+	t.MaxFeatures, err = dict.toInt("max_features_")
+	if err != nil {
+		return
+	}
+	t.NClasses, err = dict.toInt("n_classes_")
+	if err != nil {
+		return
+	}
+	t.NOutputs, err = dict.toInt("n_outputs_")
+	if err != nil {
+		return
+	}
+
+	// classes_: ndarray of shape (n_classes_,) or (n_classes_, n_outputs_)
+	arr := NumpyArrayRaw{}
+	classesObj, err := dict.value("classes_")
+	if err != nil {
+		return err
+	}
+	err = ParseClass(&arr, classesObj)
+	if err != nil {
+		return err
+	}
+	if arr.Type.Type != "i8" || arr.Type.LittleEndinan != true {
+		return fmt.Errorf("expected ndtype \"i8\" little endian (got: %#v)", arr.Type)
+	}
+
+	t.Classes = make([]int, 0, arr.Shape[0]*arr.Shape[1])
+	err = arr.Data.Iterate(8, func(b []byte) error {
+		t.Classes = append(t.Classes, int(binary.LittleEndian.Uint64(b)))
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	// estimators_: ndarray of shape (n_estimators, n_outputs_) or (n_estimators,)
+	arr = NumpyArrayRaw{}
+	obj, err := dict.value("estimators_")
+	if err != nil {
+		return
+	}
+	err = ParseClass(&arr, obj)
+	if err != nil {
+		return
+	}
+
+	// Handle different shapes: (n_estimators,) for single output, (n_estimators, n_outputs_) for multi-output
+	totalTrees := arr.Shape[0]
+	if len(arr.Shape) > 1 {
+		totalTrees = arr.Shape[0] * arr.Shape[1]
+	}
+
+	t.Estimators = make([]SklearnDecisionTreeRegressor, 0, totalTrees)
+	for i := range arr.DataList {
+		t.Estimators = append(t.Estimators, SklearnDecisionTreeRegressor{})
+		err = ParseClass(&t.Estimators[i], arr.DataList[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	return
+}
+
+// SklearnExtraTreesClassifier represents sklearn's ExtraTreesClassifier
+// Same structure as RandomForestClassifier
+type SklearnExtraTreesClassifier struct {
+	NEstimators int
+	MaxFeatures int
+	NClasses    int
+	Classes     []int
+	Estimators  []SklearnDecisionTreeRegressor
+	NOutputs    int
+}
+
+// Reduce handles the pickle REDUCE opcode for ExtraTreesClassifier
+func (t *SklearnExtraTreesClassifier) Reduce(reduce Reduce) (err error) {
+	_, err = toGlobal(reduce.Callable, "copy_reg", "_reconstructor")
+	if err != nil {
+		return
+	}
+	if len(reduce.Args) != 3 {
+		return fmt.Errorf("not expected tuple: %#v", reduce.Args)
+	}
+	_, err = toGlobal(reduce.Args[0], "sklearn.ensemble.forest", "ExtraTreesClassifier")
+	if err != nil {
+		return
+	}
+	return
+}
+
+// Build handles the pickle BUILD opcode for ExtraTreesClassifier
+// Identical to RandomForestClassifier
+func (t *SklearnExtraTreesClassifier) Build(build Build) (err error) {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return
+	}
+
+	t.NEstimators, err = dict.toInt("n_estimators")
+	if err != nil {
+		return
+	}
+	t.MaxFeatures, err = dict.toInt("max_features_")
+	if err != nil {
+		return
+	}
+	t.NClasses, err = dict.toInt("n_classes_")
+	if err != nil {
+		return
+	}
+	t.NOutputs, err = dict.toInt("n_outputs_")
+	if err != nil {
+		return
+	}
+
+	arr := NumpyArrayRaw{}
+	classesObj, err := dict.value("classes_")
+	if err != nil {
+		return err
+	}
+	err = ParseClass(&arr, classesObj)
+	if err != nil {
+		return err
+	}
+	if arr.Type.Type != "i8" || arr.Type.LittleEndinan != true {
+		return fmt.Errorf("expected ndtype \"i8\" little endian (got: %#v)", arr.Type)
+	}
+
+	t.Classes = make([]int, 0, arr.Shape[0]*arr.Shape[1])
+	err = arr.Data.Iterate(8, func(b []byte) error {
+		t.Classes = append(t.Classes, int(binary.LittleEndian.Uint64(b)))
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	arr = NumpyArrayRaw{}
+	obj, err := dict.value("estimators_")
+	if err != nil {
+		return
+	}
+	err = ParseClass(&arr, obj)
+	if err != nil {
+		return
+	}
+
+	totalTrees := arr.Shape[0]
+	if len(arr.Shape) > 1 {
+		totalTrees = arr.Shape[0] * arr.Shape[1]
+	}
+
+	t.Estimators = make([]SklearnDecisionTreeRegressor, 0, totalTrees)
+	for i := range arr.DataList {
+		t.Estimators = append(t.Estimators, SklearnDecisionTreeRegressor{})
+		err = ParseClass(&t.Estimators[i], arr.DataList[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	return
+}
+
+// SklearnHistGradientBoostingClassifier represents sklearn's HistGradientBoostingClassifier
+// Note: This uses a different internal structure than regular GradientBoostingClassifier
+type SklearnHistGradientBoostingClassifier struct {
+	NClasses         int
+	Classes          []int
+	NEstimators      int
+	MaxFeatures      int
+	NBins            int
+	LearningRate     float64
+	BinData          []byte // Compiled histogram data
+	MissingThreshold float64
+	// For regression, these fields are used instead
+	IsClassifier bool
+}
+
+// Reduce handles the pickle REDUCE opcode for HistGradientBoostingClassifier
+func (t *SklearnHistGradientBoostingClassifier) Reduce(reduce Reduce) (err error) {
+	_, err = toGlobal(reduce.Callable, "copy_reg", "_reconstructor")
+	if err != nil {
+		return
+	}
+	if len(reduce.Args) != 3 {
+		return fmt.Errorf("not expected tuple: %#v", reduce.Args)
+	}
+	_, err = toGlobal(reduce.Args[0], "sklearn.ensemble._hist_gradient_boosting", "HistGradientBoostingClassifier")
+	if err != nil {
+		return
+	}
+	return
+}
+
+// Build handles the pickle BUILD opcode for HistGradientBoostingClassifier
+func (t *SklearnHistGradientBoostingClassifier) Build(build Build) (err error) {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return
+	}
+
+	t.NClasses, err = dict.toInt("n_classes_")
+	if err != nil {
+		return
+	}
+
+	t.LearningRate, err = dict.toFloat("learning_rate")
+	if err != nil {
+		return
+	}
+
+	t.NEstimators, err = dict.toInt("n_estimators")
+	if err != nil {
+		return
+	}
+
+	t.MaxFeatures, err = dict.toInt("max_features_")
+	if err != nil {
+		return
+	}
+
+	t.NBins, err = dict.toInt("n_bins_")
+	if err != nil {
+		return
+	}
+
+	// classes_: ndarray of shape (n_classes_,)
+	arr := NumpyArrayRaw{}
+	classesObj, err := dict.value("classes_")
+	if err != nil {
+		return err
+	}
+	err = ParseClass(&arr, classesObj)
+	if err != nil {
+		return err
+	}
+	if arr.Type.Type != "i8" || arr.Type.LittleEndinan != true {
+		return fmt.Errorf("expected ndtype \"i8\" little endian (got: %#v)", arr.Type)
+	}
+
+	t.Classes = make([]int, 0, arr.Shape[0])
+	err = arr.Data.Iterate(8, func(b []byte) error {
+		t.Classes = append(t.Classes, int(binary.LittleEndian.Uint64(b)))
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	// bin_data_: optional compiled histogram data
+	obj, err := dict.value("bin_data_")
+	if err != nil {
+		// May not exist in all versions
+		t.IsClassifier = true
+		return nil
+	}
+
+	if arr, ok := obj.(List); ok && len(arr) >= 2 {
+		t.IsClassifier = true
+	}
+
 	return
 }
 

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/xgbin"
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/internal/xgbin"
+	"github.com/citizenadam/go-xgboost-lightgrb/transformation"
 )
 
 // XGBLinearFromReader reads  XGBoost's 'gblinear' model from `reader`

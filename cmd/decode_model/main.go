@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves"
+	"github.com/citizenadam/go-xgboost-lightgrb"
 )
 
 func main() {

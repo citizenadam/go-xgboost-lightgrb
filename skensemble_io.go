@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/internal/pickle"
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/transformation"
+	"github.com/citizenadam/go-xgboost-lightgrb/internal/pickle"
+	"github.com/citizenadam/go-xgboost-lightgrb/transformation"
 )
 
 func lgTreeFromSklearnDecisionTreeRegressor(tree pickle.SklearnDecisionTreeRegressor, scale float64, base float64) (lgTree, error) {
@@ -184,4 +184,18 @@ func SKEnsembleFromFile(filename string, loadTransformation bool) (*Ensemble, er
 	defer reader.Close()
 	bufReader := bufio.NewReader(reader)
 	return SKEnsembleFromReader(bufReader, loadTransformation)
+}
+
+// SKEnsembleFromPickleFile reads sklearn tree ensemble model from pickle file
+// Supports pickle protocols 0-5
+// This is an alias for SKEnsembleFromFile for API clarity
+func SKEnsembleFromPickleFile(filename string, loadTransformation bool) (*Ensemble, error) {
+	return SKEnsembleFromFile(filename, loadTransformation)
+}
+
+// SKEnsembleFromPickleReader reads sklearn tree ensemble model from pickle reader
+// Supports pickle protocols 0-5
+// This is an alias for SKEnsembleFromReader for API clarity
+func SKEnsembleFromPickleReader(reader *bufio.Reader, loadTransformation bool) (*Ensemble, error) {
+	return SKEnsembleFromReader(reader, loadTransformation)
 }

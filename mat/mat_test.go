@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citizenadam/go-xgboost-lightgrb/leaves/util"
+	"github.com/citizenadam/go-xgboost-lightgrb/util"
 )
 
 func TestDenseMatZero(t *testing.T) {
