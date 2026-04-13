@@ -2,6 +2,7 @@ package leaves
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 
@@ -246,28 +247,78 @@ func parseCalibratedClassifierCV(calibrated *pickle.SklearnCalibratedClassifierC
 // parseXGBClassifierFromCalibrated parses an XGBClassifier from inside a CalibratedClassifierCV
 func parseXGBClassifierFromCalibrated(xgbModel *pickle.SklearnXGBClassifier, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
 	// The booster_ contains the actual xgboost Booster model
-	// It could be in various formats:
-	// 1. A pickled xgboost.Booster object (native XGBoost format)
-	// 2. A pickled Booster in sklearn-compatible format
+	// Now with recursive parsing, BoosterObj is *SklearnXGBoostBooster
 
-	// For now, try to parse the booster as an XGBoost model
-	// We'll need to handle the case where booster_ is a pickled Booster object
+	booster, ok := xgbModel.BoosterObj.(*pickle.SklearnXGBoostBooster)
+	if !ok {
+		return nil, fmt.Errorf("invalid booster type for XGBoost: %T", xgbModel.BoosterObj)
+	}
 
-	// TODO: Implement proper XGBClassifier booster parsing
-	// The booster_ attribute needs to be decoded and converted to Ensemble
+	// Extract the model state - typically stored in "_learner" key
+	rawLearner, ok := booster.Learner["_learner"]
+	if !ok {
+		return nil, fmt.Errorf("booster_ attribute missing _learner key")
+	}
 
-	// For now, return an error indicating this needs implementation
-	return nil, fmt.Errorf("XGBClassifier booster parsing not yet implemented - the booster object needs to be decoded")
+	modelData, ok := rawLearner.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("_learner data is not a byte slice, got %T", rawLearner)
+	}
+
+	// Use bufio wrapper for binary parsing (required by XGEnsembleFromReader)
+	bufReader := bufio.NewReader(bytes.NewReader(modelData))
+	ensemble, err := XGEnsembleFromReader(bufReader, false)
+	if err != nil {
+		return nil, fmt.Errorf("XGEnsembleFromReader failed: %w", err)
+	}
+
+	// Build calibration transformation with ensemble averaging
+	calTransform := buildCalibratedTransform(calibrators, ensemble.NRawOutputGroups())
+	return &Ensemble{ensemble, calTransform}, nil
 }
 
 // parseLGBMClassifierFromCalibrated parses an LGBMClassifier from inside a CalibratedClassifierCV
 func parseLGBMClassifierFromCalibrated(lgbmModel *pickle.SklearnLGBMClassifier, calibrators []pickle.SklearnLogisticRegression) (*Ensemble, error) {
 	// The booster_ contains the actual lightgbm Booster model
+	// Now with recursive parsing, BoosterObj is *SklearnLightGBMBooster
 
-	// TODO: Implement proper LGBMClassifier booster parsing
-	// The booster_ attribute needs to be decoded and converted to Ensemble
+	booster, ok := lgbmModel.BoosterObj.(*pickle.SklearnLightGBMBooster)
+	if !ok {
+		return nil, fmt.Errorf("invalid booster type for LightGBM: %T", lgbmModel.BoosterObj)
+	}
 
-	return nil, fmt.Errorf("LGBMClassifier booster parsing not yet implemented - the booster object needs to be decoded")
+	// LightGBM typically stores model as JSON string in "handle" or "_handle" key
+	var modelJSON []byte
+
+	// Try "handle" key first
+	if handle, ok := booster.Handle["handle"]; ok {
+		if str, ok := handle.(string); ok {
+			modelJSON = []byte(str)
+		}
+	}
+
+	// If not found, try "_handle"
+	if modelJSON == nil {
+		if handle, ok := booster.Handle["_handle"]; ok {
+			if str, ok := handle.(string); ok {
+				modelJSON = []byte(str)
+			}
+		}
+	}
+
+	if len(modelJSON) == 0 {
+		return nil, fmt.Errorf("no model data found in LightGBM booster handle")
+	}
+
+	// Use JSON parser for LightGBM (takes io.Reader, not bufio.Reader)
+	ensemble, err := LGEnsembleFromJSON(bytes.NewReader(modelJSON), false)
+	if err != nil {
+		return nil, fmt.Errorf("LGEnsembleFromJSON failed: %w", err)
+	}
+
+	// Build calibration transformation with ensemble averaging
+	calTransform := buildCalibratedTransform(calibrators, ensemble.NRawOutputGroups())
+	return &Ensemble{ensemble, calTransform}, nil
 }
 
 // parseGradientBoostingFromCalibrated parses a GradientBoostingClassifier from inside a CalibratedClassifierCV

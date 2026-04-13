@@ -881,9 +881,15 @@ func (t *SklearnXGBClassifier) Build(build Build) error {
 	// Get the booster_ attribute which contains the actual xgboost model
 	boosterObj, err := dict.value("booster_")
 	if err != nil {
-		return fmt.Errorf("failed to get booster_: %w", err)
+		return fmt.Errorf("missing booster_ attribute in XGBClassifier: %w", err)
 	}
-	t.BoosterObj = boosterObj
+
+	// Recursive parsing of the nested booster object
+	booster := &SklearnXGBoostBooster{}
+	if err := ParseClass(booster, boosterObj); err != nil {
+		return fmt.Errorf("failed to recursively parse XGBoost booster: %w", err)
+	}
+	t.BoosterObj = booster
 
 	return nil
 }
@@ -922,9 +928,15 @@ func (t *SklearnLGBMClassifier) Build(build Build) error {
 	// Get the booster_ attribute which contains the actual lightgbm model
 	boosterObj, err := dict.value("booster_")
 	if err != nil {
-		return fmt.Errorf("failed to get booster_: %w", err)
+		return fmt.Errorf("missing booster_ attribute in LGBMClassifier: %w", err)
 	}
-	t.BoosterObj = boosterObj
+
+	// Recursive parsing of the nested booster object
+	booster := &SklearnLightGBMBooster{}
+	if err := ParseClass(booster, boosterObj); err != nil {
+		return fmt.Errorf("failed to recursively parse LightGBM booster: %w", err)
+	}
+	t.BoosterObj = booster
 
 	return nil
 }
@@ -939,25 +951,40 @@ func ParseLGBMClassifier(obj any) (*SklearnLGBMClassifier, error) {
 	return lgbm, nil
 }
 
-// BoosterFromPickle decodes a pickled xgboost.Booster object
-// The booster is typically stored as a nested pickle object within XGBClassifier
-func BoosterFromPickle(obj any) ([]byte, error) {
-	// The booster object could be:
-	// 1. A Reduce/Build containing the pickled Booster data
-	// 2. A direct byte representation
+// SklearnXGBoostBooster parses the xgboost.core.Booster nested in XGBClassifier
+type SklearnXGBoostBooster struct {
+	Learner Dict
+}
 
-	switch o := obj.(type) {
-	case Build:
-		// The booster is stored as a Build object with the actual booster in Args
-		// We need to re-encode it to bytes for the XGBoost parser
-		_ = o // Build contains the booster data in Args
-		return nil, fmt.Errorf("Booster needs to be extracted from Build - not directly supported")
-	case Reduce:
-		// Try to extract the booster from the Reduce
-		_ = o
-		return nil, fmt.Errorf("Booster needs to be extracted from Reduce - not directly supported")
-	default:
-		// The booster object type is not recognized
-		return nil, fmt.Errorf("unrecognized booster object type: %T", obj)
+func (b *SklearnXGBoostBooster) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "xgboost.core", "Booster")
+	return err
+}
+
+func (b *SklearnXGBoostBooster) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
 	}
+	b.Learner = dict
+	return nil
+}
+
+// SklearnLightGBMBooster parses the lightgbm.basic.Booster nested in LGBMClassifier
+type SklearnLightGBMBooster struct {
+	Handle Dict
+}
+
+func (b *SklearnLightGBMBooster) Reduce(reduce Reduce) error {
+	_, err := toGlobal(reduce.Callable, "lightgbm.basic", "Booster")
+	return err
+}
+
+func (b *SklearnLightGBMBooster) Build(build Build) error {
+	dict, err := toDict(build.Args)
+	if err != nil {
+		return err
+	}
+	b.Handle = dict
+	return nil
 }
